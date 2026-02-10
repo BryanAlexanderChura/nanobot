@@ -1,0 +1,16 @@
+services:
+  nanobot:
+    build: .
+    container_name: nanobot
+    restart: unless-stopped
+    ports:
+      - "18790:18790"
+    volumes:
+      - nanobot-data:/root/.nanobot
+      - ./nanobot:/app/nanobot        # dev: hot-reload código Python
+    env_file:
+      - .env
+    command: ["gateway"]
+
+volumes:
+  nanobot-data:
