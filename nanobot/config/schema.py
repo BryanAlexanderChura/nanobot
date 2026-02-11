@@ -93,10 +93,17 @@ class ExecToolConfig(BaseModel):
     restrict_to_workspace: bool = False  # If true, block commands accessing paths outside workspace
 
 
+class SupabaseConfig(BaseModel):
+    """Supabase connection configuration."""
+    url: str = ""
+    service_key: str = ""  # service_role key for server-side access
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    supabase: SupabaseConfig = Field(default_factory=SupabaseConfig)
 
 
 class Config(BaseSettings):

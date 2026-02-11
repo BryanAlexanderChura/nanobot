@@ -21,3 +21,6 @@ poetry.lock
 tests/
 botpy.log
 docs/*
+
+# Terminal Paste Image folder
+.cp-images/
