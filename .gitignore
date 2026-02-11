@@ -16,3 +16,6 @@ docs/
 .venv/
 __pycache__/
 docs/*
+
+# Terminal Paste Image folder
+.cp-images/
