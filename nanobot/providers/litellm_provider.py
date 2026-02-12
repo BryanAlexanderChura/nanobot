@@ -69,6 +69,7 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        thinking: bool = True,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -118,7 +119,11 @@ class LiteLLMProvider(LLMProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        
+
+        # Thinking control (GLM-4.7, etc.)
+        if not thinking:
+            kwargs["thinking"] = {"type": "disabled"}
+
         # Pass api_base directly for custom endpoints (vLLM, etc.)
         if self.api_base:
             kwargs["api_base"] = self.api_base

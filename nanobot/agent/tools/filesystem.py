@@ -8,15 +8,18 @@ from nanobot.agent.tools.base import Tool
 
 class ReadFileTool(Tool):
     """Tool to read file contents."""
-    
+
+    def __init__(self, base_dir: str | None = None):
+        self._base_dir = Path(base_dir).resolve() if base_dir else None
+
     @property
     def name(self) -> str:
         return "read_file"
     
     @property
     def description(self) -> str:
-        return "Read the contents of a file at the given path."
-    
+        return "Read file contents. Supports comma-separated paths to read multiple files at once."
+
     @property
     def parameters(self) -> dict[str, Any]:
         return {
@@ -24,22 +27,38 @@ class ReadFileTool(Tool):
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The file path to read"
+                    "description": "File path (or comma-separated paths for multiple files)"
                 }
             },
             "required": ["path"]
         }
-    
+
     async def execute(self, path: str, **kwargs: Any) -> str:
+        paths = [p.strip() for p in path.split(",")]
+        results = []
+        for p in paths:
+            results.append(self._read_one(p))
+        return "\n\n---\n\n".join(results)
+
+    def _read_one(self, path: str) -> str:
         try:
-            file_path = Path(path).expanduser()
+            raw_path = Path(path).expanduser()
+
+            if self._base_dir:
+                file_path = raw_path.resolve() if raw_path.is_absolute() else (self._base_dir / raw_path).resolve()
+                try:
+                    file_path.relative_to(self._base_dir)
+                except ValueError:
+                    return f"Error: Permission denied: {path}"
+            else:
+                file_path = raw_path
+
             if not file_path.exists():
                 return f"Error: File not found: {path}"
             if not file_path.is_file():
                 return f"Error: Not a file: {path}"
-            
-            content = file_path.read_text(encoding="utf-8")
-            return content
+
+            return file_path.read_text(encoding="utf-8")
         except PermissionError:
             return f"Error: Permission denied: {path}"
         except Exception as e:

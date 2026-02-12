@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from cachetools import TTLCache
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, safe_filename
@@ -68,7 +69,7 @@ class SessionManager:
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(Path.home() / ".nanobot" / "sessions")
-        self._cache: dict[str, Session] = {}
+        self._cache: TTLCache = TTLCache(maxsize=100, ttl=7200)
     
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""

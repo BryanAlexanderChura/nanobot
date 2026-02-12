@@ -3,7 +3,7 @@
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
-import { WhatsAppClient, InboundMessage } from './whatsapp.js';
+import { WhatsAppClient } from './whatsapp.js';
 
 interface SendCommand {
   type: 'send';
@@ -13,6 +13,7 @@ interface SendCommand {
 
 interface BridgeMessage {
   type: 'message' | 'status' | 'qr' | 'error';
+  media?: string[];
   [key: string]: unknown;
 }
 

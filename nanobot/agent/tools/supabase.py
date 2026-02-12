@@ -7,15 +7,24 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 
 
-def _get_client():
-    """Create Supabase client lazily."""
-    from supabase import create_client
+_client_cache = None
+
+
+async def _get_client():
+    """Create and cache async Supabase client lazily."""
+    global _client_cache
+    if _client_cache is not None:
+        return _client_cache
+
+    from supabase import acreate_client
 
     url = os.environ.get("SUPABASE_URL", "")
     key = os.environ.get("SUPABASE_SERVICE_KEY", "")
     if not url or not key:
         raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
-    return create_client(url, key)
+
+    _client_cache = await acreate_client(url, key)
+    return _client_cache
 
 
 class SupabaseTool(Tool):
@@ -56,16 +65,37 @@ class SupabaseTool(Tool):
 
     def __init__(self):
         self._phone: str | None = None
+        self._cliente_cache: dict | None = None
+        self._cliente_loaded = False
 
     def set_phone(self, phone: str) -> None:
         """Set current customer phone from WhatsApp chat_id."""
         # WhatsApp JID: 51987654321@s.whatsapp.net -> 51987654321
-        self._phone = phone.split("@")[0] if "@" in phone else phone
+        raw_phone = phone.split("@")[0] if "@" in phone else phone
+        if raw_phone != self._phone:
+            self._phone = raw_phone
+            self._cliente_cache = None
+            self._cliente_loaded = False
+
+    async def build_customer_context(self, chat_id: str) -> str:
+        """Build customer context for the system prompt from chat id."""
+        self.set_phone(chat_id)
+        db = await _get_client()
+        cliente = await self._get_cliente(db)
+
+        name = cliente.get("nombre") if cliente else None
+        if not name:
+            return ""
+
+        return (
+            f"\n## Cliente actual\nNombre: {name}\nTelefono: {self._phone}\n"
+            f"Saluda al cliente por su nombre."
+        )
 
     # ------------------------------------------------------------------
     async def execute(self, accion: str, **kwargs: Any) -> str:
         try:
-            db = _get_client()
+            db = await _get_client()
         except RuntimeError as e:
             return f"Error: {e}"
 
@@ -91,7 +121,7 @@ class SupabaseTool(Tool):
 
     async def _servicios(self, db, **_) -> str:
         """Return available service categories."""
-        res = (
+        res = await (
             db.table("servicios_catalogo")
             .select("categoria")
             .eq("activo", True)
@@ -126,7 +156,7 @@ class SupabaseTool(Tool):
             query = query.ilike("nombre", f"%{busqueda}%")
 
         query = query.order("categoria").order("precio")
-        res = query.limit(10).execute()
+        res = await query.limit(10).execute()
 
         if not res.data:
             return "No se encontraron servicios con ese filtro."
@@ -151,7 +181,7 @@ class SupabaseTool(Tool):
         if not cliente:
             return "No encontre tu cuenta. Es tu primera vez con nosotros?"
 
-        res = (
+        res = await (
             db.table("pedidos")
             .select("codigo, estado, importe, cargo_delivery, created_at, observaciones")
             .eq("cliente_id", cliente["cliente_id"])
@@ -191,7 +221,7 @@ class SupabaseTool(Tool):
             return "No encontre tu cuenta."
 
         # Get active orders with deliveries
-        pedidos = (
+        pedidos = await (
             db.table("pedidos")
             .select("codigo")
             .eq("cliente_id", cliente["cliente_id"])
@@ -202,7 +232,7 @@ class SupabaseTool(Tool):
             return "No tienes pedidos activos."
 
         codigos = [p["codigo"] for p in pedidos.data]
-        entregas = (
+        entregas = await (
             db.table("entregas")
             .select("pedido_codigo, tipo, estado, fecha_programada, franja_horaria, estimado_llegada")
             .in_("pedido_codigo", codigos)
@@ -241,7 +271,7 @@ class SupabaseTool(Tool):
         from datetime import date
 
         try:
-            res = db.rpc(
+            res = await db.rpc(
                 "fn_slots_disponibles_v1",
                 {"p_sucursal_id": sid, "p_fecha": date.today().isoformat()},
             ).execute()
@@ -279,12 +309,14 @@ class SupabaseTool(Tool):
         """Find customer by phone (tries telefono_whatsapp then telefono)."""
         if not self._phone:
             return None
+        if self._cliente_loaded:
+            return self._cliente_cache
 
         # Normalize: ensure +country format for WhatsApp field
         phone_with_plus = self._phone if self._phone.startswith("+") else f"+{self._phone}"
 
         # Try telefono_whatsapp first (primary for WhatsApp users)
-        res = (
+        res = await (
             db.table("clientes")
             .select("cliente_id, nombre, sucursal_id, telefono, telefono_whatsapp")
             .eq("telefono_whatsapp", phone_with_plus)
@@ -292,17 +324,21 @@ class SupabaseTool(Tool):
             .execute()
         )
         if res.data:
-            return res.data[0]
+            self._cliente_cache = res.data[0]
+            self._cliente_loaded = True
+            return self._cliente_cache
 
         # Fallback: try telefono field with raw number
-        res = (
+        res = await (
             db.table("clientes")
             .select("cliente_id, nombre, sucursal_id, telefono, telefono_whatsapp")
             .eq("telefono", self._phone)
             .limit(1)
             .execute()
         )
-        return res.data[0] if res.data else None
+        self._cliente_cache = res.data[0] if res.data else None
+        self._cliente_loaded = True
+        return self._cliente_cache
 
     async def _resolve_sucursal(self, db) -> str:
         """Get branch ID from current customer, or first active branch."""
@@ -311,7 +347,7 @@ class SupabaseTool(Tool):
             return cliente["sucursal_id"]
 
         # Fallback: first active branch
-        res = (
+        res = await (
             db.table("sucursales")
             .select("id")
             .eq("estado", "Activa")

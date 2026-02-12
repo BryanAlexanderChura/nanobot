@@ -19,8 +19,11 @@ class ContextBuilder:
     
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
     
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, entity: str | None = None):
         self.workspace = workspace
+        self.entity = entity
+        self.customer_context: str = ""
+        self._entity_prompt_cache: str | None = None
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
     
@@ -34,8 +37,12 @@ class ContextBuilder:
         Returns:
             Complete system prompt.
         """
+        # Entity mode: load only IDENTITY_{X}.md + SOUL_{X}.md
+        if self.entity:
+            return self._build_entity_prompt()
+
         parts = []
-        
+
         # Core identity
         parts.append(self._get_identity())
         
@@ -69,6 +76,27 @@ Skills with available="false" need dependencies installed first - you can try in
         
         return "\n\n---\n\n".join(parts)
     
+    def _build_entity_prompt(self) -> str:
+        """Build prompt from entity-specific files (IDENTITY_{X}.md, SOUL_{X}.md)."""
+        from datetime import datetime
+
+        if self._entity_prompt_cache is None:
+            suffix = f"_{self.entity.upper()}"
+            parts = []
+            for prefix in ("IDENTITY", "SOUL"):
+                fp = self.workspace / f"{prefix}{suffix}.md"
+                if fp.exists():
+                    parts.append(fp.read_text(encoding="utf-8"))
+            self._entity_prompt_cache = "\n\n---\n\n".join(parts)
+
+        base_prompt = self._entity_prompt_cache.replace(
+            "{now}", datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+        )
+
+        if self.customer_context:
+            return "\n\n---\n\n".join([base_prompt, self.customer_context]) if base_prompt else self.customer_context
+        return base_prompt
+
     def _get_identity(self) -> str:
         """Get the core identity section."""
         from datetime import datetime

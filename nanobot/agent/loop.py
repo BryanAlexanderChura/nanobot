@@ -44,6 +44,11 @@ class AgentLoop:
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
+        safe_mode: bool = False,
+        entity: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        thinking: bool = True,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -55,24 +60,40 @@ class AgentLoop:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
-        
-        self.context = ContextBuilder(workspace)
+        self.safe_mode = safe_mode
+        self.entity = entity
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.thinking = thinking
+
+        self.context = ContextBuilder(workspace, entity=entity if safe_mode else None)
         self.sessions = SessionManager(workspace)
         self.tools = ToolRegistry()
-        self.subagents = SubagentManager(
-            provider=provider,
-            workspace=workspace,
-            bus=bus,
-            model=self.model,
-            brave_api_key=brave_api_key,
-            exec_config=self.exec_config,
-        )
-        
+        self._supabase_tool = None
+        if not safe_mode:
+            self.subagents = SubagentManager(
+                provider=provider,
+                workspace=workspace,
+                bus=bus,
+                model=self.model,
+                brave_api_key=brave_api_key,
+                exec_config=self.exec_config,
+            )
+
         self._running = False
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
+        if self.safe_mode:
+            from nanobot.agent.tools.supabase import SupabaseTool
+            from nanobot.agent.tools.cuidado_textil import CuidadoTextilTool
+            self._supabase_tool = SupabaseTool()
+            self.tools.register(self._supabase_tool)
+            refs_dir = self.workspace / "skills" / "cuidado-textil" / "references"
+            if refs_dir.exists():
+                self.tools.register(CuidadoTextilTool(references_dir=str(refs_dir)))
+            return
         # File tools
         self.tools.register(ReadFileTool())
         self.tools.register(WriteFileTool())
@@ -155,7 +176,16 @@ class AgentLoop:
         
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
-        
+
+        # In safe_mode, resolve customer by phone for the system prompt
+        if self.safe_mode and self._supabase_tool:
+            try:
+                self.context.customer_context = await self._supabase_tool.build_customer_context(
+                    msg.chat_id
+                )
+            except Exception as e:
+                logger.warning(f"Customer lookup failed: {e}")
+
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
@@ -189,7 +219,10 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                thinking=self.thinking,
             )
             
             # Handle tool calls
@@ -291,7 +324,10 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                thinking=self.thinking,
             )
             
             if response.has_tool_calls:
@@ -341,6 +377,7 @@ class AgentLoop:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        media: list[str] | None = None,
     ) -> str:
         """
         Process a message directly (for CLI or cron usage).
@@ -350,6 +387,7 @@ class AgentLoop:
             session_key: Session identifier.
             channel: Source channel (for context).
             chat_id: Source chat ID (for context).
+            media: Optional local media paths (images, etc.).
         
         Returns:
             The agent's response.
@@ -358,7 +396,8 @@ class AgentLoop:
             channel=channel,
             sender_id="user",
             chat_id=chat_id,
-            content=content
+            content=content,
+            media=media or [],
         )
         
         response = await self._process_message(msg)

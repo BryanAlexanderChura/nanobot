@@ -102,6 +102,8 @@ class WhatsAppChannel(BaseChannel):
             # Incoming message from WhatsApp
             sender = data.get("sender", "")
             content = data.get("content", "")
+            raw_media = data.get("media", [])
+            media = [str(path) for path in raw_media if isinstance(path, str)] if isinstance(raw_media, list) else []
             
             # sender is typically: <phone>@s.whatsapp.net
             # Extract just the phone number as chat_id
@@ -116,10 +118,12 @@ class WhatsAppChannel(BaseChannel):
                 sender_id=chat_id,
                 chat_id=sender,  # Use full JID for replies
                 content=content,
+                media=media,
                 metadata={
                     "message_id": data.get("id"),
                     "timestamp": data.get("timestamp"),
-                    "is_group": data.get("isGroup", False)
+                    "is_group": data.get("isGroup", False),
+                    "media_count": len(media),
                 }
             )
         
