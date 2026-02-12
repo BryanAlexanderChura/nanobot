@@ -111,7 +111,7 @@ async def main():
     from nanobot.config.loader import load_config
     from nanobot.bus.queue import MessageBus
     from nanobot.providers.factory import create_provider
-    from nanobot.agent.loop import AgentLoop
+    from nanobot.agent.loop import AgentLoop, _split_chunks
 
     config = load_config()
     bus = MessageBus()
@@ -188,7 +188,14 @@ async def main():
             )
             elapsed = time.time() - t0
 
-            print(f"Bot ({elapsed:.1f}s): {response}\n")
+            chunks = _split_chunks(response)
+            if len(chunks) == 1:
+                print(f"Bot ({elapsed:.1f}s): {chunks[0]}\n")
+            else:
+                print(f"Bot ({elapsed:.1f}s):")
+                for i, chunk in enumerate(chunks, 1):
+                    print(f"  [{i}] {chunk}")
+                print()
 
         except (KeyboardInterrupt, EOFError):
             print("\nFin del test.")

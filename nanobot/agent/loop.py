@@ -150,7 +150,15 @@ class AgentLoop:
                 try:
                     response = await self._process_message(msg)
                     if response:
-                        await self.bus.publish_outbound(response)
+                        chunks = _split_chunks(response.content)
+                        for i, chunk in enumerate(chunks):
+                            if i > 0:
+                                await asyncio.sleep(0.8)
+                            await self.bus.publish_outbound(OutboundMessage(
+                                channel=response.channel,
+                                chat_id=response.chat_id,
+                                content=chunk,
+                            ))
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
                     # Send error response
@@ -498,7 +506,7 @@ Respond with ONLY valid JSON, no markdown fences."""
             media: Optional local media paths (images, etc.).
 
         Returns:
-            The agent's response.
+            The agent's response (raw, may contain ||| delimiters).
         """
         msg = InboundMessage(
             channel=channel,
@@ -510,3 +518,10 @@ Respond with ONLY valid JSON, no markdown fences."""
 
         response = await self._process_message(msg, session_key=session_key)
         return response.content if response else ""
+
+
+def _split_chunks(text: str) -> list[str]:
+    """Split response by ||| delimiter, return non-empty stripped chunks."""
+    if "|||" not in text:
+        return [text]
+    return [c.strip() for c in text.split("|||") if c.strip()]

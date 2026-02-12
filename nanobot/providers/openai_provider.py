@@ -67,9 +67,17 @@ class OpenAIProvider(LLMProvider):
             "temperature": temperature,
         }
 
-        # Thinking control (GLM-4.7, etc.)
-        if not thinking:
-            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        # Cerebras OpenAI-compatible endpoint expects GLM reasoning controls
+        # via extra_body (not body.thinking).
+        api_base = (self.api_base or "").lower()
+        if "cerebras.ai" in api_base and ("glm" in model.lower() or "zai" in model.lower()):
+            kwargs["extra_body"] = {
+                "disable_reasoning": not thinking,
+                "clear_thinking": not thinking,
+            }
+        else:
+            # Keep silent for other providers; avoid unsupported body.thinking payload.
+            _ = thinking
 
         if tools:
             kwargs["tools"] = tools
