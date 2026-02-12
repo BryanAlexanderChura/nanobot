@@ -45,6 +45,7 @@ class AgentDefaults(BaseModel):
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 20
+    thinking: bool = True  # Enable/disable model thinking (GLM-4.7, etc.)
 
 
 class AgentsConfig(BaseModel):

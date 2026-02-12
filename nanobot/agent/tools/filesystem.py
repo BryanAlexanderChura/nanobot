@@ -6,19 +6,11 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 
 
-def _resolve_path(path: str, allowed_dir: Path | None = None) -> Path:
-    """Resolve path and optionally enforce directory restriction."""
-    resolved = Path(path).expanduser().resolve()
-    if allowed_dir and not str(resolved).startswith(str(allowed_dir.resolve())):
-        raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
-    return resolved
-
-
 class ReadFileTool(Tool):
     """Tool to read file contents."""
-    
-    def __init__(self, allowed_dir: Path | None = None):
-        self._allowed_dir = allowed_dir
+
+    def __init__(self, base_dir: str | None = None):
+        self._base_dir = Path(base_dir).resolve() if base_dir else None
 
     @property
     def name(self) -> str:
@@ -26,8 +18,8 @@ class ReadFileTool(Tool):
     
     @property
     def description(self) -> str:
-        return "Read the contents of a file at the given path."
-    
+        return "Read file contents. Supports comma-separated paths to read multiple files at once."
+
     @property
     def parameters(self) -> dict[str, Any]:
         return {
@@ -35,24 +27,40 @@ class ReadFileTool(Tool):
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The file path to read"
+                    "description": "File path (or comma-separated paths for multiple files)"
                 }
             },
             "required": ["path"]
         }
-    
+
     async def execute(self, path: str, **kwargs: Any) -> str:
+        paths = [p.strip() for p in path.split(",")]
+        results = []
+        for p in paths:
+            results.append(self._read_one(p))
+        return "\n\n---\n\n".join(results)
+
+    def _read_one(self, path: str) -> str:
         try:
-            file_path = _resolve_path(path, self._allowed_dir)
+            raw_path = Path(path).expanduser()
+
+            if self._base_dir:
+                file_path = raw_path.resolve() if raw_path.is_absolute() else (self._base_dir / raw_path).resolve()
+                try:
+                    file_path.relative_to(self._base_dir)
+                except ValueError:
+                    return f"Error: Permission denied: {path}"
+            else:
+                file_path = raw_path
+
             if not file_path.exists():
                 return f"Error: File not found: {path}"
             if not file_path.is_file():
                 return f"Error: Not a file: {path}"
-            
-            content = file_path.read_text(encoding="utf-8")
-            return content
-        except PermissionError as e:
-            return f"Error: {e}"
+
+            return file_path.read_text(encoding="utf-8")
+        except PermissionError:
+            return f"Error: Permission denied: {path}"
         except Exception as e:
             return f"Error reading file: {str(e)}"
 
@@ -60,9 +68,6 @@ class ReadFileTool(Tool):
 class WriteFileTool(Tool):
     """Tool to write content to a file."""
     
-    def __init__(self, allowed_dir: Path | None = None):
-        self._allowed_dir = allowed_dir
-
     @property
     def name(self) -> str:
         return "write_file"
@@ -90,12 +95,12 @@ class WriteFileTool(Tool):
     
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._allowed_dir)
+            file_path = Path(path).expanduser()
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {path}"
-        except PermissionError as e:
-            return f"Error: {e}"
+        except PermissionError:
+            return f"Error: Permission denied: {path}"
         except Exception as e:
             return f"Error writing file: {str(e)}"
 
@@ -103,9 +108,6 @@ class WriteFileTool(Tool):
 class EditFileTool(Tool):
     """Tool to edit a file by replacing text."""
     
-    def __init__(self, allowed_dir: Path | None = None):
-        self._allowed_dir = allowed_dir
-
     @property
     def name(self) -> str:
         return "edit_file"
@@ -137,7 +139,7 @@ class EditFileTool(Tool):
     
     async def execute(self, path: str, old_text: str, new_text: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._allowed_dir)
+            file_path = Path(path).expanduser()
             if not file_path.exists():
                 return f"Error: File not found: {path}"
             
@@ -155,8 +157,8 @@ class EditFileTool(Tool):
             file_path.write_text(new_content, encoding="utf-8")
             
             return f"Successfully edited {path}"
-        except PermissionError as e:
-            return f"Error: {e}"
+        except PermissionError:
+            return f"Error: Permission denied: {path}"
         except Exception as e:
             return f"Error editing file: {str(e)}"
 
@@ -164,9 +166,6 @@ class EditFileTool(Tool):
 class ListDirTool(Tool):
     """Tool to list directory contents."""
     
-    def __init__(self, allowed_dir: Path | None = None):
-        self._allowed_dir = allowed_dir
-
     @property
     def name(self) -> str:
         return "list_dir"
@@ -190,7 +189,7 @@ class ListDirTool(Tool):
     
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
-            dir_path = _resolve_path(path, self._allowed_dir)
+            dir_path = Path(path).expanduser()
             if not dir_path.exists():
                 return f"Error: Directory not found: {path}"
             if not dir_path.is_dir():
@@ -205,7 +204,7 @@ class ListDirTool(Tool):
                 return f"Directory {path} is empty"
             
             return "\n".join(items)
-        except PermissionError as e:
-            return f"Error: {e}"
+        except PermissionError:
+            return f"Error: Permission denied: {path}"
         except Exception as e:
             return f"Error listing directory: {str(e)}"

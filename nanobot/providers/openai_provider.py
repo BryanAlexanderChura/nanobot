@@ -42,6 +42,7 @@ class OpenAIProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        thinking: bool = True,
     ) -> LLMResponse:
         """
         Send a chat completion request via OpenAI SDK.
@@ -49,9 +50,10 @@ class OpenAIProvider(LLMProvider):
         Args:
             messages: List of message dicts with 'role' and 'content'.
             tools: Optional list of tool definitions in OpenAI format.
-            model: Model identifier (e.g., 'gpt-4o', 'GLM/glm-4.7-thinking-official').
+            model: Model identifier (e.g., 'gpt-4o', 'GLM-4.7').
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            thinking: Enable/disable model thinking (for models that support it).
 
         Returns:
             LLMResponse with content and/or tool calls.
@@ -64,6 +66,10 @@ class OpenAIProvider(LLMProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+
+        # Thinking control (GLM-4.7, etc.)
+        if not thinking:
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
         if tools:
             kwargs["tools"] = tools

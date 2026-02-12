@@ -26,7 +26,7 @@ from nanobot.session.manager import SessionManager
 class AgentLoop:
     """
     The agent loop is the core processing engine.
-    
+
     It:
     1. Receives messages from the bus
     2. Builds context with history, memory, skills
@@ -34,7 +34,7 @@ class AgentLoop:
     4. Executes tool calls
     5. Sends responses back
     """
-    
+
     def __init__(
         self,
         bus: MessageBus,
@@ -48,6 +48,11 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
+        safe_mode: bool = False,
+        entity: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        thinking: bool = True,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -61,60 +66,78 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
-        
-        self.context = ContextBuilder(workspace)
+        self.safe_mode = safe_mode
+        self.entity = entity
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.thinking = thinking
+
+        self.context = ContextBuilder(workspace, entity=entity if safe_mode else None)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
-        self.subagents = SubagentManager(
-            provider=provider,
-            workspace=workspace,
-            bus=bus,
-            model=self.model,
-            brave_api_key=brave_api_key,
-            exec_config=self.exec_config,
-            restrict_to_workspace=restrict_to_workspace,
-        )
-        
+        self._supabase_tool = None
+
+        if not safe_mode:
+            self.subagents = SubagentManager(
+                provider=provider,
+                workspace=workspace,
+                bus=bus,
+                model=self.model,
+                brave_api_key=brave_api_key,
+                exec_config=self.exec_config,
+                restrict_to_workspace=restrict_to_workspace,
+            )
+
         self._running = False
         self._register_default_tools()
-    
+
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
+        if self.safe_mode:
+            from nanobot.agent.tools.supabase import SupabaseTool
+            from nanobot.agent.tools.cuidado_textil import CuidadoTextilTool
+            self._supabase_tool = SupabaseTool()
+            self.tools.register(self._supabase_tool)
+            refs_dir = self.workspace / "skills" / "cuidado-textil" / "references"
+            if refs_dir.exists():
+                self.tools.register(CuidadoTextilTool(references_dir=str(refs_dir)))
+            return
+
         # File tools (restrict to workspace if configured)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
         self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
         self.tools.register(EditFileTool(allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(allowed_dir=allowed_dir))
-        
+
         # Shell tool
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
         ))
-        
+
         # Web tools
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
-        
+
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
-        
+
         # Spawn tool (for subagents)
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
-        
+
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
-    
+
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
         logger.info("Agent loop started")
-        
+
         while self._running:
             try:
                 # Wait for next message
@@ -122,7 +145,7 @@ class AgentLoop:
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
-                
+
                 # Process it
                 try:
                     response = await self._process_message(msg)
@@ -138,35 +161,34 @@ class AgentLoop:
                     ))
             except asyncio.TimeoutError:
                 continue
-    
+
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
-    
+
     async def _process_message(self, msg: InboundMessage, session_key: str | None = None) -> OutboundMessage | None:
         """
         Process a single inbound message.
-        
+
         Args:
             msg: The inbound message to process.
             session_key: Override session key (used by process_direct).
-        
+
         Returns:
             The response message, or None if no response needed.
         """
         # Handle system messages (subagent announces)
-        # The chat_id contains the original "channel:chat_id" to route back to
         if msg.channel == "system":
             return await self._process_system_message(msg)
-        
+
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
-        
+
         # Get or create session
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
-        
+
         # Handle slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
@@ -178,24 +200,33 @@ class AgentLoop:
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
-        
+
         # Consolidate memory before processing if session is too large
         if len(session.messages) > self.memory_window:
             await self._consolidate_memory(session)
-        
+
+        # In safe_mode, resolve customer by phone for the system prompt
+        if self.safe_mode and self._supabase_tool:
+            try:
+                self.context.customer_context = await self._supabase_tool.build_customer_context(
+                    msg.chat_id
+                )
+            except Exception as e:
+                logger.warning(f"Customer lookup failed: {e}")
+
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(msg.channel, msg.chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
-        
+
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -204,22 +235,25 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-        
+
         # Agent loop
         iteration = 0
         final_content = None
         tools_used: list[str] = []
-        
+
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             # Call LLM
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                thinking=self.thinking,
             )
-            
+
             # Handle tool calls
             if response.has_tool_calls:
                 # Add assistant message with tool calls
@@ -229,7 +263,7 @@ class AgentLoop:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)  # Must be JSON string
+                            "arguments": json.dumps(tc.arguments)
                         }
                     }
                     for tc in response.tool_calls
@@ -238,7 +272,7 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
-                
+
                 # Execute tools
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
@@ -254,66 +288,65 @@ class AgentLoop:
                 # No tool calls, we're done
                 final_content = response.content
                 break
-        
+
         if final_content is None:
             if iteration >= self.max_iterations:
                 final_content = f"Reached {self.max_iterations} iterations without completion."
             else:
                 final_content = "I've completed processing but have no response to give."
-        
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
-        
+
         # Save to session (include tool names so consolidation sees what happened)
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content,
                             tools_used=tools_used if tools_used else None)
         self.sessions.save(session)
-        
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
+            metadata=msg.metadata or {},
         )
-    
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
-        
+
         The chat_id field contains "original_channel:original_chat_id" to route
         the response back to the correct destination.
         """
         logger.info(f"Processing system message from {msg.sender_id}")
-        
+
         # Parse origin from chat_id (format: "channel:chat_id")
         if ":" in msg.chat_id:
             parts = msg.chat_id.split(":", 1)
             origin_channel = parts[0]
             origin_chat_id = parts[1]
         else:
-            # Fallback
             origin_channel = "cli"
             origin_chat_id = msg.chat_id
-        
+
         # Use the origin session for context
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
-        
+
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(origin_channel, origin_chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(origin_channel, origin_chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
-        
+
         # Build messages with the announce content
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -321,20 +354,23 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        
+
         # Agent loop (limited for announce handling)
         iteration = 0
         final_content = None
-        
+
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                thinking=self.thinking,
             )
-            
+
             if response.has_tool_calls:
                 tool_call_dicts = [
                     {
@@ -351,7 +387,7 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
-                
+
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
@@ -364,21 +400,21 @@ class AgentLoop:
             else:
                 final_content = response.content
                 break
-        
+
         if final_content is None:
             final_content = "Background task completed."
-        
-        # Save to session (mark as system message in history)
+
+        # Save to session
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
         session.add_message("assistant", final_content)
         self.sessions.save(session)
-        
+
         return OutboundMessage(
             channel=origin_channel,
             chat_id=origin_chat_id,
             content=final_content
         )
-    
+
     async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
         """Consolidate old messages into MEMORY.md + HISTORY.md, then trim session."""
         if not session.messages:
@@ -449,16 +485,18 @@ Respond with ONLY valid JSON, no markdown fences."""
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        media: list[str] | None = None,
     ) -> str:
         """
         Process a message directly (for CLI or cron usage).
-        
+
         Args:
             content: The message content.
             session_key: Session identifier (overrides channel:chat_id for session lookup).
             channel: Source channel (for tool context routing).
             chat_id: Source chat ID (for tool context routing).
-        
+            media: Optional local media paths (images, etc.).
+
         Returns:
             The agent's response.
         """
@@ -466,8 +504,9 @@ Respond with ONLY valid JSON, no markdown fences."""
             channel=channel,
             sender_id="user",
             chat_id=chat_id,
-            content=content
+            content=content,
+            media=media or [],
         )
-        
+
         response = await self._process_message(msg, session_key=session_key)
         return response.content if response else ""
