@@ -2,6 +2,9 @@
 
 import asyncio
 import json
+import shutil
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +52,8 @@ class AgentLoop:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         thinking: bool = True,
+        session_backend: str = "file",
+        channels: list[str] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -66,8 +71,9 @@ class AgentLoop:
         self.max_tokens = max_tokens
         self.thinking = thinking
 
+        self.channels = set(channels) if channels else None  # None = accept all
         self.context = ContextBuilder(workspace, entity=entity if safe_mode else None)
-        self.sessions = SessionManager(workspace)
+        self.sessions = SessionManager(workspace, backend=session_backend)
         self.tools = ToolRegistry()
         self._supabase_tool = None
         if not safe_mode:
@@ -81,6 +87,10 @@ class AgentLoop:
             )
 
         self._running = False
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._instance_id = uuid.uuid4().hex[:8]
+        self._scratch_dir = Path(tempfile.gettempdir()) / "nanobot" / self._instance_id
+        self._scratch_dir.mkdir(parents=True, exist_ok=True)
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
@@ -124,45 +134,59 @@ class AgentLoop:
             self.tools.register(CronTool(self.cron_service))
     
     async def run(self) -> None:
-        """Run the agent loop, processing messages from the bus."""
+        """Run the agent loop, processing messages from the bus.
+
+        Messages from different sessions are processed concurrently.
+        Messages within the same session are serialized via per-session locks.
+        """
         self._running = True
         logger.info("Agent loop started")
-        
+
         while self._running:
             try:
-                # Wait for next message
                 msg = await asyncio.wait_for(
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
-                
-                # Process it
-                try:
-                    response = await self._process_message(msg)
-                    if response:
-                        chunks = _split_chunks(response.content)
-                        for i, chunk in enumerate(chunks):
-                            if i > 0:
-                                await asyncio.sleep(0.8)
-                            await self.bus.publish_outbound(OutboundMessage(
-                                channel=response.channel,
-                                chat_id=response.chat_id,
-                                content=chunk,
-                            ))
-                except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    # Send error response
-                    await self.bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=f"Sorry, I encountered an error: {str(e)}"
-                    ))
+                # Process each message concurrently; lock per session inside
+                asyncio.create_task(self._handle_message(msg))
             except asyncio.TimeoutError:
                 continue
+
+    async def _handle_message(self, msg: InboundMessage) -> None:
+        """Handle a single message with per-session serialization."""
+        # Skip messages from channels this agent doesn't serve
+        if self.channels and msg.channel not in self.channels and msg.channel != "system":
+            # Re-queue so another agent can pick it up
+            await self.bus.publish_inbound(msg)
+            return
+
+        lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
+        async with lock:
+            try:
+                response = await self._process_message(msg)
+                if response:
+                    chunks = _split_chunks(response.content)
+                    for i, chunk in enumerate(chunks):
+                        if i > 0:
+                            await asyncio.sleep(0.8)
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=response.channel,
+                            chat_id=response.chat_id,
+                            content=chunk,
+                        ))
+            except Exception as e:
+                logger.error(f"Error processing message: {e}")
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Sorry, I encountered an error: {str(e)}"
+                ))
     
     def stop(self) -> None:
-        """Stop the agent loop."""
+        """Stop the agent loop and clean up scratch directory."""
         self._running = False
+        shutil.rmtree(self._scratch_dir, ignore_errors=True)
         logger.info("Agent loop stopping")
     
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
@@ -183,30 +207,34 @@ class AgentLoop:
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}")
         
         # Get or create session
-        session = self.sessions.get_or_create(msg.session_key)
+        session = await self.sessions.get_or_create(msg.session_key)
+
+        # Request-scoped context: isolated per message, no shared mutable state
+        request_ctx = {"channel": msg.channel, "chat_id": msg.chat_id}
 
         # In safe_mode, resolve customer by phone for the system prompt
+        customer_context = ""
         if self.safe_mode and self._supabase_tool:
             try:
-                self.context.customer_context = await self._supabase_tool.build_customer_context(
+                customer_context = await self._supabase_tool.build_customer_context(
                     msg.chat_id
                 )
             except Exception as e:
                 logger.warning(f"Customer lookup failed: {e}")
 
-        # Update tool contexts
+        # Legacy: also set_context for backwards compat (CLI, single-user)
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(msg.channel, msg.chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
-        
+
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -214,6 +242,7 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
+            customer_context=customer_context,
         )
         
         # Agent loop
@@ -251,11 +280,13 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts
                 )
                 
-                # Execute tools
+                # Execute tools (pass request_ctx for session-aware tools)
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments)
                     logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = await self.tools.execute(
+                        tool_call.name, tool_call.arguments, ctx=request_ctx
+                    )
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -263,14 +294,14 @@ class AgentLoop:
                 # No tool calls, we're done
                 final_content = response.content
                 break
-        
+
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
         
         # Save to session
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
-        self.sessions.save(session)
+        await self.sessions.save(session)
         
         return OutboundMessage(
             channel=msg.channel,
@@ -299,17 +330,20 @@ class AgentLoop:
         
         # Use the origin session for context
         session_key = f"{origin_channel}:{origin_chat_id}"
-        session = self.sessions.get_or_create(session_key)
-        
-        # Update tool contexts
+        session = await self.sessions.get_or_create(session_key)
+
+        # Request-scoped context for this system message
+        request_ctx = {"channel": origin_channel, "chat_id": origin_chat_id}
+
+        # Legacy: also set_context for backwards compat
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(origin_channel, origin_chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(origin_channel, origin_chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
@@ -357,21 +391,23 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments)
                     logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = await self.tools.execute(
+                        tool_call.name, tool_call.arguments, ctx=request_ctx
+                    )
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
             else:
                 final_content = response.content
                 break
-        
+
         if final_content is None:
             final_content = "Background task completed."
         
         # Save to session (mark as system message in history)
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
         session.add_message("assistant", final_content)
-        self.sessions.save(session)
+        await self.sessions.save(session)
         
         return OutboundMessage(
             channel=origin_channel,

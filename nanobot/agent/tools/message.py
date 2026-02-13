@@ -58,14 +58,15 @@ class MessageTool(Tool):
         }
     
     async def execute(
-        self, 
-        content: str, 
-        channel: str | None = None, 
+        self,
+        content: str,
+        channel: str | None = None,
         chat_id: str | None = None,
+        _ctx: dict | None = None,
         **kwargs: Any
     ) -> str:
-        channel = channel or self._default_channel
-        chat_id = chat_id or self._default_chat_id
+        channel = channel or (_ctx or {}).get("channel") or self._default_channel
+        chat_id = chat_id or (_ctx or {}).get("chat_id") or self._default_chat_id
         
         if not channel or not chat_id:
             return "Error: No target channel/chat specified"

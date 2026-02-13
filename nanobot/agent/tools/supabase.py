@@ -93,7 +93,7 @@ class SupabaseTool(Tool):
         )
 
     # ------------------------------------------------------------------
-    async def execute(self, accion: str, **kwargs: Any) -> str:
+    async def execute(self, accion: str, _ctx: dict | None = None, **kwargs: Any) -> str:
         try:
             db = await _get_client()
         except RuntimeError as e:

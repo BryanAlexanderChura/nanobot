@@ -256,21 +256,34 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
-    # Create agent with cron service
+    # Create agent(s): use profiles if configured, otherwise single default agent
     defaults = config.agents.defaults
-    agent = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=defaults.model,
-        max_iterations=defaults.max_tool_iterations,
-        brave_api_key=config.tools.web.search.api_key or None,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        thinking=defaults.thinking,
-    )
+    profiles = config.agents.profiles
+
+    if profiles:
+        from nanobot.agent.factory import create_agent_from_profile
+        agents = {
+            p.name: create_agent_from_profile(p, bus, provider, config, cron_service=cron)
+            for p in profiles
+        }
+        # Primary agent = first profile (used for cron/heartbeat callbacks)
+        agent = next(iter(agents.values()))
+        console.print(f"[green]✓[/green] Agent profiles: {', '.join(agents.keys())}")
+    else:
+        agent = AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=config.workspace_path,
+            model=defaults.model,
+            max_iterations=defaults.max_tool_iterations,
+            brave_api_key=config.tools.web.search.api_key or None,
+            exec_config=config.tools.exec,
+            cron_service=cron,
+            temperature=defaults.temperature,
+            max_tokens=defaults.max_tokens,
+            thinking=defaults.thinking,
+        )
+        agents = {"default": agent}
     
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -321,15 +334,17 @@ def gateway(
         try:
             await cron.start()
             await heartbeat.start()
+            agent_tasks = [a.run() for a in agents.values()]
             await asyncio.gather(
-                agent.run(),
+                *agent_tasks,
                 channels.start_all(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
             heartbeat.stop()
             cron.stop()
-            agent.stop()
+            for a in agents.values():
+                a.stop()
             await channels.stop_all()
     
     asyncio.run(run())

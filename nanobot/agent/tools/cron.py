@@ -65,20 +65,27 @@ class CronTool(Tool):
         every_seconds: int | None = None,
         cron_expr: str | None = None,
         job_id: str | None = None,
+        _ctx: dict | None = None,
         **kwargs: Any
     ) -> str:
+        ctx = _ctx or {}
         if action == "add":
-            return self._add_job(message, every_seconds, cron_expr)
+            return self._add_job(message, every_seconds, cron_expr, ctx)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
             return self._remove_job(job_id)
         return f"Unknown action: {action}"
-    
-    def _add_job(self, message: str, every_seconds: int | None, cron_expr: str | None) -> str:
+
+    def _add_job(
+        self, message: str, every_seconds: int | None, cron_expr: str | None,
+        ctx: dict | None = None,
+    ) -> str:
         if not message:
             return "Error: message is required for add"
-        if not self._channel or not self._chat_id:
+        channel = (ctx or {}).get("channel") or self._channel
+        chat_id = (ctx or {}).get("chat_id") or self._chat_id
+        if not channel or not chat_id:
             return "Error: no session context (channel/chat_id)"
         
         # Build schedule
@@ -94,8 +101,8 @@ class CronTool(Tool):
             schedule=schedule,
             message=message,
             deliver=True,
-            channel=self._channel,
-            to=self._chat_id,
+            channel=channel,
+            to=chat_id,
         )
         return f"Created job '{job.name}' (id: {job.id})"
     
