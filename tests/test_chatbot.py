@@ -97,12 +97,13 @@ def reset_test_state(workspace: Path) -> None:
         removed += 1
         print("[Sesion anterior limpiada]")
 
-    # Clean workspace memory files used by MemoryStore
-    memory_dir = workspace / "memory"
-    if memory_dir.exists():
-        for fp in memory_dir.glob("*.md"):
-            fp.unlink()
-            removed += 1
+    # Clean agent memory files (new structure: agents/{entity}/memory/)
+    for agent_dir in (workspace / "agents").iterdir() if (workspace / "agents").exists() else []:
+        mem_dir = agent_dir / "memory"
+        if mem_dir.exists():
+            for fp in mem_dir.glob("*.md"):
+                fp.unlink()
+                removed += 1
 
     print(f"[Test limpio] persistencia reiniciada ({removed} archivos)")
 
@@ -128,8 +129,8 @@ async def main():
         bus=bus,
         provider=provider,
         workspace=workspace_path,
-        safe_mode=True,
         entity="lavanderia",
+        allowed_tools=["safe", "comms"],
         temperature=defaults.temperature,
         max_tokens=defaults.max_tokens,
         thinking=defaults.thinking,

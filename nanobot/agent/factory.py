@@ -37,11 +37,11 @@ def create_agent_from_profile(
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         cron_service=cron_service,
-        safe_mode=profile.safe_mode,
         entity=profile.entity,
         temperature=defaults.temperature,
         max_tokens=defaults.max_tokens,
         thinking=defaults.thinking,
         session_backend=profile.session_backend,
         channels=profile.channels or None,
+        allowed_tools=profile.tools or None,
     )

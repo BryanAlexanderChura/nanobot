@@ -53,9 +53,9 @@ class AgentProfile(BaseModel):
     name: str = "default"
     model: str | None = None          # Override defaults.model
     workspace: str | None = None      # Sub-workspace path (None = use global)
-    safe_mode: bool = False
-    entity: str | None = None         # Entity name for safe_mode (IDENTITY_X.md, SOUL_X.md)
+    entity: str | None = None         # Agent identity dir (workspace/agents/{entity}/)
     channels: list[str] = Field(default_factory=list)  # Which channels this profile serves
+    tools: list[str] = Field(default_factory=list)  # Tool names to enable (empty = all)
     session_backend: str = "file"     # "file" | "supabase"
 
 

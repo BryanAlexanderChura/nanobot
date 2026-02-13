@@ -18,9 +18,11 @@ class SkillsLoader:
     specific tools or perform certain tasks.
     """
     
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
+    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None,
+                 agent_skills_dir: Path | None = None):
         self.workspace = workspace
-        self.workspace_skills = workspace / "skills"
+        self.agent_skills = agent_skills_dir  # highest priority
+        self.workspace_skills = workspace / "skills"  # shared
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
     
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
@@ -34,8 +36,16 @@ class SkillsLoader:
             List of skill info dicts with 'name', 'path', 'source'.
         """
         skills = []
-        
-        # Workspace skills (highest priority)
+
+        # Agent-specific skills (highest priority)
+        if self.agent_skills and self.agent_skills.exists():
+            for skill_dir in self.agent_skills.iterdir():
+                if skill_dir.is_dir():
+                    skill_file = skill_dir / "SKILL.md"
+                    if skill_file.exists():
+                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "agent"})
+
+        # Shared workspace skills
         if self.workspace_skills.exists():
             for skill_dir in self.workspace_skills.iterdir():
                 if skill_dir.is_dir():
@@ -66,7 +76,13 @@ class SkillsLoader:
         Returns:
             Skill content or None if not found.
         """
-        # Check workspace first
+        # Check agent-specific first
+        if self.agent_skills:
+            agent_skill = self.agent_skills / name / "SKILL.md"
+            if agent_skill.exists():
+                return agent_skill.read_text(encoding="utf-8")
+
+        # Check shared workspace
         workspace_skill = self.workspace_skills / name / "SKILL.md"
         if workspace_skill.exists():
             return workspace_skill.read_text(encoding="utf-8")

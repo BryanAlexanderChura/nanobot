@@ -21,6 +21,7 @@ from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.handoff import HandoffTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
 
@@ -37,6 +38,15 @@ class AgentLoop:
     5. Sends responses back
     """
     
+    # Tool groups for declarative profile configuration
+    TOOL_GROUPS = {
+        "safe":   ["consulta", "consulta_cuidado"],
+        "files":  ["read_file", "write_file", "edit_file", "list_dir"],
+        "web":    ["web_search", "web_fetch"],
+        "comms":  ["message", "handoff"],
+        "system": ["exec", "spawn", "cron"],
+    }
+
     def __init__(
         self,
         bus: MessageBus,
@@ -47,13 +57,13 @@ class AgentLoop:
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
-        safe_mode: bool = False,
         entity: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         thinking: bool = True,
         session_backend: str = "file",
         channels: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -65,26 +75,25 @@ class AgentLoop:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
-        self.safe_mode = safe_mode
         self.entity = entity
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.thinking = thinking
 
         self.channels = set(channels) if channels else None  # None = accept all
-        self.context = ContextBuilder(workspace, entity=entity if safe_mode else None)
+        self.allowed_tools = self._resolve_tools(allowed_tools) if allowed_tools else None
+        self.context = ContextBuilder(workspace, entity=entity)
         self.sessions = SessionManager(workspace, backend=session_backend)
         self.tools = ToolRegistry()
         self._supabase_tool = None
-        if not safe_mode:
-            self.subagents = SubagentManager(
-                provider=provider,
-                workspace=workspace,
-                bus=bus,
-                model=self.model,
-                brave_api_key=brave_api_key,
-                exec_config=self.exec_config,
-            )
+        self.subagents = SubagentManager(
+            provider=provider,
+            workspace=workspace,
+            bus=bus,
+            model=self.model,
+            brave_api_key=brave_api_key,
+            exec_config=self.exec_config,
+        )
 
         self._running = False
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -93,45 +102,49 @@ class AgentLoop:
         self._scratch_dir.mkdir(parents=True, exist_ok=True)
         self._register_default_tools()
     
+    @classmethod
+    def _resolve_tools(cls, names: list[str]) -> set[str]:
+        """Expand tool group names into individual tool names."""
+        result = set()
+        for n in names:
+            result.update(cls.TOOL_GROUPS.get(n, [n]))
+        return result
+
     def _register_default_tools(self) -> None:
-        """Register the default set of tools."""
-        if self.safe_mode:
-            from nanobot.agent.tools.supabase import SupabaseTool
-            from nanobot.agent.tools.cuidado_textil import CuidadoTextilTool
-            self._supabase_tool = SupabaseTool()
-            self.tools.register(self._supabase_tool)
-            refs_dir = self.workspace / "skills" / "cuidado-textil" / "references"
-            if refs_dir.exists():
-                self.tools.register(CuidadoTextilTool(references_dir=str(refs_dir)))
-            return
-        # File tools
-        self.tools.register(ReadFileTool())
-        self.tools.register(WriteFileTool())
-        self.tools.register(EditFileTool())
-        self.tools.register(ListDirTool())
-        
-        # Shell tool
-        self.tools.register(ExecTool(
-            working_dir=str(self.workspace),
-            timeout=self.exec_config.timeout,
-            restrict_to_workspace=self.exec_config.restrict_to_workspace,
-        ))
-        
-        # Web tools
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
-        self.tools.register(WebFetchTool())
-        
-        # Message tool
-        message_tool = MessageTool(send_callback=self.bus.publish_outbound)
-        self.tools.register(message_tool)
-        
-        # Spawn tool (for subagents)
-        spawn_tool = SpawnTool(manager=self.subagents)
-        self.tools.register(spawn_tool)
-        
-        # Cron tool (for scheduling)
+        """Register tools, filtered by allowed_tools (groups or individual names)."""
+        from nanobot.agent.tools.supabase import SupabaseTool
+        from nanobot.agent.tools.cuidado_textil import CuidadoTextilTool
+
+        all_tools = [
+            ReadFileTool(),
+            WriteFileTool(),
+            EditFileTool(),
+            ListDirTool(),
+            ExecTool(
+                working_dir=str(self.workspace),
+                timeout=self.exec_config.timeout,
+                restrict_to_workspace=self.exec_config.restrict_to_workspace,
+            ),
+            WebSearchTool(api_key=self.brave_api_key),
+            WebFetchTool(),
+            MessageTool(send_callback=self.bus.publish_outbound),
+            SpawnTool(manager=self.subagents),
+            HandoffTool(bus=self.bus),
+        ]
         if self.cron_service:
-            self.tools.register(CronTool(self.cron_service))
+            all_tools.append(CronTool(self.cron_service))
+
+        # Domain-specific tools
+        self._supabase_tool = SupabaseTool()
+        all_tools.append(self._supabase_tool)
+        entity_name = self.entity or "general"
+        refs_dir = self.workspace / "agents" / entity_name / "skills" / "cuidado-textil" / "references"
+        if refs_dir.exists():
+            all_tools.append(CuidadoTextilTool(references_dir=str(refs_dir)))
+
+        for tool in all_tools:
+            if self.allowed_tools is None or tool.name in self.allowed_tools:
+                self.tools.register(tool)
     
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus.
@@ -155,6 +168,18 @@ class AgentLoop:
 
     async def _handle_message(self, msg: InboundMessage) -> None:
         """Handle a single message with per-session serialization."""
+        # Accept handoff messages targeted at this agent's channels
+        effective_channel = msg.channel
+        if msg.channel.startswith("handoff:") and self.channels:
+            target = msg.channel.split(":", 1)[1]
+            if target in self.channels or target == getattr(self, 'entity', None):
+                effective_channel = msg.metadata.get("origin_channel", msg.channel)
+                msg = InboundMessage(
+                    channel=effective_channel, sender_id=msg.sender_id,
+                    chat_id=msg.chat_id, content=msg.content,
+                    media=msg.media, metadata=msg.metadata,
+                )
+
         # Skip messages from channels this agent doesn't serve
         if self.channels and msg.channel not in self.channels and msg.channel != "system":
             # Re-queue so another agent can pick it up
@@ -212,9 +237,9 @@ class AgentLoop:
         # Request-scoped context: isolated per message, no shared mutable state
         request_ctx = {"channel": msg.channel, "chat_id": msg.chat_id}
 
-        # In safe_mode, resolve customer by phone for the system prompt
+        # Resolve customer context if supabase tool is active
         customer_context = ""
-        if self.safe_mode and self._supabase_tool:
+        if self._supabase_tool and self.tools.get("consulta"):
             try:
                 customer_context = await self._supabase_tool.build_customer_context(
                     msg.chat_id
@@ -234,6 +259,10 @@ class AgentLoop:
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
+
+        handoff_tool = self.tools.get("handoff")
+        if isinstance(handoff_tool, HandoffTool):
+            handoff_tool.set_context(msg.channel, msg.chat_id)
 
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
