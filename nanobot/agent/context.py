@@ -28,19 +28,22 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
     
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self, skill_names: list[str] | None = None, customer_context: str | None = None
+    ) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
-        
+
         Args:
             skill_names: Optional list of skills to include.
-        
+            customer_context: Optional customer context (request-scoped).
+
         Returns:
             Complete system prompt.
         """
         # Entity mode: load only IDENTITY_{X}.md + SOUL_{X}.md
         if self.entity:
-            return self._build_entity_prompt()
+            return self._build_entity_prompt(customer_context=customer_context)
 
         parts = []
 
@@ -77,7 +80,7 @@ Skills with available="false" need dependencies installed first - you can try in
         
         return "\n\n---\n\n".join(parts)
     
-    def _build_entity_prompt(self) -> str:
+    def _build_entity_prompt(self, customer_context: str | None = None) -> str:
         """Build prompt from entity-specific files (IDENTITY_{X}.md, SOUL_{X}.md)."""
         from datetime import datetime
 
@@ -94,8 +97,10 @@ Skills with available="false" need dependencies installed first - you can try in
             "{now}", datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         )
 
-        if self.customer_context:
-            return "\n\n---\n\n".join([base_prompt, self.customer_context]) if base_prompt else self.customer_context
+        # Request-scoped customer_context; fallback to instance attr for compat
+        ctx = customer_context if customer_context is not None else self.customer_context
+        if ctx:
+            return "\n\n---\n\n".join([base_prompt, ctx]) if base_prompt else ctx
         return base_prompt
 
     def _get_identity(self) -> str:
@@ -157,6 +162,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        customer_context: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Build the complete message list for an LLM call.
@@ -168,14 +174,17 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             media: Optional list of local file paths for images/media.
             channel: Current channel (telegram, feishu, etc.).
             chat_id: Current chat/user ID.
+            customer_context: Optional customer context (request-scoped).
+                Falls back to self.customer_context for backwards compat.
 
         Returns:
             List of messages including system prompt.
         """
         messages = []
 
-        # System prompt
-        system_prompt = self.build_system_prompt(skill_names)
+        # System prompt (use request-scoped customer_context if provided)
+        effective_customer = customer_context if customer_context is not None else self.customer_context
+        system_prompt = self.build_system_prompt(skill_names, customer_context=effective_customer)
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})

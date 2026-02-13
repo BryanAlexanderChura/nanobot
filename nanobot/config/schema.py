@@ -48,9 +48,21 @@ class AgentDefaults(BaseModel):
     thinking: bool = True  # Enable/disable model thinking (GLM-4.7, etc.)
 
 
+class AgentProfile(BaseModel):
+    """A named agent profile with its own personality, model, and tools."""
+    name: str = "default"
+    model: str | None = None          # Override defaults.model
+    workspace: str | None = None      # Sub-workspace path (None = use global)
+    safe_mode: bool = False
+    entity: str | None = None         # Entity name for safe_mode (IDENTITY_X.md, SOUL_X.md)
+    channels: list[str] = Field(default_factory=list)  # Which channels this profile serves
+    session_backend: str = "file"     # "file" | "supabase"
+
+
 class AgentsConfig(BaseModel):
     """Agent configuration."""
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    profiles: list[AgentProfile] = Field(default_factory=list)
 
 
 class ProviderConfig(BaseModel):
