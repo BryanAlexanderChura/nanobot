@@ -20,14 +20,18 @@ class ContextBuilder:
     
     BOOTSTRAP_FILES = ["IDENTITY.md", "SOUL.md", "AGENTS.md", "USER.md", "TOOLS.md"]
     
-    def __init__(self, workspace: Path, entity: str | None = None):
+    def __init__(self, workspace: Path, entity: str | None = None,
+                 allowed_skills: list[str] | None = None):
         self.workspace = workspace
         self.entity = entity or "general"
         self.entity_dir = workspace / "agents" / self.entity
         self.customer_context: str = ""
         self._entity_prompt_cache: str | None = None
         self.memory = MemoryStore(self.entity_dir)
-        self.skills = SkillsLoader(workspace, agent_skills_dir=self.entity_dir / "skills")
+        self.skills = SkillsLoader(
+            workspace, agent_skills_dir=self.entity_dir / "skills",
+            allowed_skills=allowed_skills,
+        )
     
     def build_system_prompt(
         self, skill_names: list[str] | None = None, customer_context: str | None = None

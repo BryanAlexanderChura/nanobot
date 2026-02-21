@@ -46,16 +46,42 @@ Channel (Telegram/WhatsApp/Feishu)
   → Channel.send()
 ```
 
+### Multi-Agent Architecture
+
+Agents are self-contained folders under `workspace/agents/`:
+
+```
+workspace/agents/
+├── general/              # Default CLI agent (all tools)
+│   ├── agent.yaml        # tools: [], channels: []
+│   ├── IDENTITY.md
+│   ├── SOUL.md
+│   ├── memory/
+│   └── skills/
+└── lavanderia/           # Specialized agent
+    ├── agent.yaml        # tools: [safe, comms], channels: [whatsapp]
+    ├── IDENTITY.md
+    ├── SOUL.md
+    ├── memory/
+    └── skills/
+```
+
+- **`agent.yaml`** — Declares `tools`, `channels`, `session_backend`. Name inferred from folder.
+- **`agent/factory.py`** — `discover_agents()` scans `workspace/agents/*/agent.yaml` to build profiles. `create_agent_from_profile()` instantiates AgentLoop per profile.
+- **Tool groups** — Defined in `AgentLoop.TOOL_GROUPS`: `safe`, `files`, `web`, `comms`, `system`. Profiles reference groups or individual tool names.
+- **Handoff** — `HandoffTool` routes messages between agents via the bus (`channel=handoff:{target}`).
+- **Skills** load in 3 levels: agent-specific (`agents/{name}/skills/`) → shared (`workspace/skills/`) → builtin (`nanobot/skills/`).
+
 ### Key Modules
 
 - **`agent/loop.py`** — Core agentic loop. Receives messages, builds context, calls LLM, executes tools in a loop (max 20 iterations), returns response. Entry points: `run()` (bus consumer) and `process_direct()` (CLI).
-- **`agent/context.py`** — Assembles system prompt from bootstrap files (`AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `IDENTITY.md`), memory, and skills.
+- **`agent/context.py`** — Assembles system prompt from `workspace/agents/{entity}/` files (IDENTITY.md, SOUL.md, etc.), memory, and skills.
 - **`bus/queue.py`** — `MessageBus` decouples channels from agent via `InboundMessage`/`OutboundMessage` async queues.
 - **`providers/factory.py`** — Factory selects `LiteLLMProvider` (multi-provider via litellm) or `OpenAIProvider` (direct SDK) based on `config.agents.defaults.provider`.
 - **`channels/manager.py`** — Starts enabled channels, routes outbound messages. Each channel implements `BaseChannel` (start/stop/send/is_allowed).
-- **`config/schema.py`** — Pydantic models for all config. Stored at `~/.nanobot/config.json`. Env vars supported with `NANOBOT_` prefix and `__` nesting.
-- **`agent/skills.py`** — Discovers `SKILL.md` files in `workspace/skills/`. Skills with `always: true` go in system prompt; others listed as XML summary for progressive loading.
-- **`agent/tools/`** — Tools implement `Tool` ABC (`name`, `description`, `parameters` JSON schema, `async execute()`). Registered in `ToolRegistry`.
+- **`config/schema.py`** — Pydantic models for all config. Stored at `~/.nanobot/config.json` or env vars with `NANOBOT_` prefix and `__` nesting. Agent profiles discovered from `agent.yaml` first, fallback to config.
+- **`agent/skills.py`** — Discovers `SKILL.md` files in agent/shared/builtin skills dirs. Skills with `always: true` go in system prompt; others listed as XML summary for progressive loading.
+- **`agent/tools/`** — Tools implement `Tool` ABC (`name`, `description`, `parameters` JSON schema, `async execute()`). Registered in `ToolRegistry`, filtered by `allowed_tools`.
 
 ### WhatsApp Bridge
 

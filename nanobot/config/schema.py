@@ -9,6 +9,7 @@ class WhatsAppConfig(BaseModel):
     """WhatsApp channel configuration."""
     enabled: bool = False
     bridge_url: str = "ws://localhost:3001"
+    bridge_token: str = ""
     allow_from: list[str] = Field(default_factory=list)  # Allowed phone numbers
 
 
@@ -56,6 +57,7 @@ class AgentProfile(BaseModel):
     entity: str | None = None         # Agent identity dir (workspace/agents/{entity}/)
     channels: list[str] = Field(default_factory=list)  # Which channels this profile serves
     tools: list[str] = Field(default_factory=list)  # Tool names to enable (empty = all)
+    skills: list[str] = Field(default_factory=list)  # Skill names to enable (empty = all)
     session_backend: str = "file"     # "file" | "supabase"
 
 

@@ -10,7 +10,8 @@ services:
       - ./nanobot:/app/nanobot        # dev: hot-reload código Python
     env_file:
       - .env
-    command: ["gateway"]
+    entrypoint: ["bash", "-c"]
+    command: ["cd /app/bridge && node dist/index.js & nanobot gateway"]
 
 volumes:
   nanobot-data:

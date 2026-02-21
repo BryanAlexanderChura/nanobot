@@ -19,11 +19,13 @@ class SkillsLoader:
     """
     
     def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None,
-                 agent_skills_dir: Path | None = None):
+                 agent_skills_dir: Path | None = None,
+                 allowed_skills: list[str] | None = None):
         self.workspace = workspace
         self.agent_skills = agent_skills_dir  # highest priority
         self.workspace_skills = workspace / "skills"  # shared
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
+        self.allowed_skills = set(allowed_skills) if allowed_skills else None  # None = all
     
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
@@ -61,6 +63,10 @@ class SkillsLoader:
                     if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
         
+        # Filter by allowed_skills whitelist (None = all)
+        if self.allowed_skills is not None:
+            skills = [s for s in skills if s["name"] in self.allowed_skills]
+
         # Filter by requirements
         if filter_unavailable:
             return [s for s in skills if self._check_requirements(self._get_skill_meta(s["name"]))]

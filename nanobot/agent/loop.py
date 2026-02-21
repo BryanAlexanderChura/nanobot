@@ -40,7 +40,7 @@ class AgentLoop:
     
     # Tool groups for declarative profile configuration
     TOOL_GROUPS = {
-        "safe":   ["consulta", "consulta_cuidado"],
+        "safe":   ["consulta", "consulta_cuidado", "read_file"],
         "files":  ["read_file", "write_file", "edit_file", "list_dir"],
         "web":    ["web_search", "web_fetch"],
         "comms":  ["message", "handoff"],
@@ -64,6 +64,7 @@ class AgentLoop:
         session_backend: str = "file",
         channels: list[str] | None = None,
         allowed_tools: list[str] | None = None,
+        allowed_skills: list[str] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -82,7 +83,9 @@ class AgentLoop:
 
         self.channels = set(channels) if channels else None  # None = accept all
         self.allowed_tools = self._resolve_tools(allowed_tools) if allowed_tools else None
-        self.context = ContextBuilder(workspace, entity=entity)
+        self.context = ContextBuilder(
+            workspace, entity=entity, allowed_skills=allowed_skills,
+        )
         self.sessions = SessionManager(workspace, backend=session_backend)
         self.tools = ToolRegistry()
         self._supabase_tool = None

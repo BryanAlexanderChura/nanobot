@@ -1,0 +1,3 @@
+tools: []
+channels: [cli]
+session_backend: file

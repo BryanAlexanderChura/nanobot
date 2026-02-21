@@ -256,12 +256,12 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
-    # Create agent(s): use profiles if configured, otherwise single default agent
+    # Create agent(s): discover from workspace/agents/ or fallback to single default
     defaults = config.agents.defaults
-    profiles = config.agents.profiles
+    from nanobot.agent.factory import discover_agents, create_agent_from_profile
+    profiles = discover_agents(config.workspace_path) or config.agents.profiles
 
     if profiles:
-        from nanobot.agent.factory import create_agent_from_profile
         agents = {
             p.name: create_agent_from_profile(p, bus, provider, config, cron_service=cron)
             for p in profiles

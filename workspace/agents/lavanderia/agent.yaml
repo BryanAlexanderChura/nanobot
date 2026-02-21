@@ -1,0 +1,4 @@
+tools: [safe, comms]
+skills: [cuidado-textil]
+channels: [whatsapp]
+session_backend: file
