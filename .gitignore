@@ -1,5 +1,6 @@
 .assets
 .env
+node_modules/
 *.pyc
 dist/
 build/
@@ -18,5 +19,9 @@ venv/
 __pycache__/
 poetry.lock
 .pytest_cache/
-botpy.log
 tests/
+botpy.log
+docs/*
+
+# Terminal Paste Image folder
+.cp-images/

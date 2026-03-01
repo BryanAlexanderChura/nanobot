@@ -7,7 +7,13 @@ dist/
 build/
 .git
 .env
+.env.*
 .assets
+.venv/
 node_modules/
 bridge/dist/
+bridge/node_modules/
 workspace/
+tests/
+CLAUDE.md
+docker-compose.yml

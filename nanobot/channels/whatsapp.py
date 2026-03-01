@@ -108,6 +108,8 @@ class WhatsAppChannel(BaseChannel):
             # New LID sytle typically: 
             sender = data.get("sender", "")
             content = data.get("content", "")
+            raw_media = data.get("media", [])
+            media = [str(path) for path in raw_media if isinstance(path, str)] if isinstance(raw_media, list) else []
             
             # Extract just the phone number or lid as chat_id
             user_id = pn if pn else sender
@@ -123,10 +125,12 @@ class WhatsAppChannel(BaseChannel):
                 sender_id=sender_id,
                 chat_id=sender,  # Use full LID for replies
                 content=content,
+                media=media,
                 metadata={
                     "message_id": data.get("id"),
                     "timestamp": data.get("timestamp"),
-                    "is_group": data.get("isGroup", False)
+                    "is_group": data.get("isGroup", False),
+                    "media_count": len(media),
                 }
             )
         

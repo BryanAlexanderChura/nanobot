@@ -18,47 +18,49 @@ class ContextBuilder:
     into a coherent prompt for the LLM.
     """
     
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    BOOTSTRAP_FILES = ["IDENTITY.md", "SOUL.md", "AGENTS.md", "USER.md", "TOOLS.md"]
     
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, entity: str | None = None,
+                 allowed_skills: list[str] | None = None):
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
-        self.skills = SkillsLoader(workspace)
+        self.entity = entity or "general"
+        self.entity_dir = workspace / "agents" / self.entity
+        self.customer_context: str = ""
+        self._entity_prompt_cache: str | None = None
+        self.memory = MemoryStore(self.entity_dir)
+        self.skills = SkillsLoader(
+            workspace, agent_skills_dir=self.entity_dir / "skills",
+            allowed_skills=allowed_skills,
+        )
     
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self, skill_names: list[str] | None = None, customer_context: str | None = None
+    ) -> str:
         """
-        Build the system prompt from bootstrap files, memory, and skills.
-        
-        Args:
-            skill_names: Optional list of skills to include.
-        
-        Returns:
-            Complete system prompt.
+        Build the system prompt from agent directory files, memory, and skills.
+
+        All agents (general and specialized) use the same flow:
+        1. Load identity files from workspace/agents/{entity}/
+        2. Load memory from workspace/agents/{entity}/memory/
+        3. Load skills (agent-specific first, then shared)
         """
         parts = []
-        
-        # Core identity
-        parts.append(self._get_identity())
-        
-        # Bootstrap files
-        bootstrap = self._load_bootstrap_files()
-        if bootstrap:
-            parts.append(bootstrap)
-        
+
+        # Identity (from agents/{entity}/ — IDENTITY.md, SOUL.md, + bootstrap files)
+        parts.append(self._build_identity_prompt(customer_context=customer_context))
+
         # Memory context
         memory = self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
-        
+
         # Skills - progressive loading
-        # 1. Always-loaded skills: include full content
         always_skills = self.skills.get_always_skills()
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
-        
-        # 2. Available skills: only show summary (agent uses read_file to load)
+
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
             parts.append(f"""# Skills
@@ -67,55 +69,39 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
-        
+
         return "\n\n---\n\n".join(parts)
     
-    def _get_identity(self) -> str:
-        """Get the core identity section."""
+    def _build_identity_prompt(self, customer_context: str | None = None) -> str:
+        """Build prompt from agent directory files.
+
+        Loads all .md files from workspace/agents/{entity}/ (IDENTITY.md, SOUL.md,
+        AGENTS.md, USER.md, TOOLS.md, etc.) and injects runtime context.
+        """
         from datetime import datetime
         import time as _time
+
+        if self._entity_prompt_cache is None:
+            parts = []
+            for filename in self.BOOTSTRAP_FILES:
+                fp = self.entity_dir / filename
+                if fp.exists():
+                    parts.append(fp.read_text(encoding="utf-8"))
+            self._entity_prompt_cache = "\n\n---\n\n".join(parts)
+
+        # Inject runtime variables
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
-        workspace_path = str(self.workspace.expanduser().resolve())
-        system = platform.system()
-        runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-        
-        return f"""# nanobot 🐈
+        agent_dir = str(self.entity_dir.expanduser().resolve())
+        base_prompt = self._entity_prompt_cache.replace("{now}", now)
+        base_prompt = base_prompt.replace("{tz}", tz)
+        base_prompt = base_prompt.replace("{agent_dir}", agent_dir)
 
-You are nanobot, a helpful AI assistant. 
-
-## Current Time
-{now} ({tz})
-
-## Runtime
-{runtime}
-
-## Workspace
-Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
-- Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
-
-IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
-Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
-For normal conversation, just respond with text - do not call the message tool.
-
-Always be helpful, accurate, and concise. Before calling tools, briefly tell the user what you're about to do (one short sentence in the user's language).
-If you need to use tools, call them directly — never send a preliminary message like "Let me check" without actually calling a tool.
-When remembering something important, write to {workspace_path}/memory/MEMORY.md
-To recall past events, grep {workspace_path}/memory/HISTORY.md"""
-    
-    def _load_bootstrap_files(self) -> str:
-        """Load all bootstrap files from workspace."""
-        parts = []
-        
-        for filename in self.BOOTSTRAP_FILES:
-            file_path = self.workspace / filename
-            if file_path.exists():
-                content = file_path.read_text(encoding="utf-8")
-                parts.append(f"## {filename}\n\n{content}")
-        
-        return "\n\n".join(parts) if parts else ""
+        # Request-scoped customer_context; fallback to instance attr for compat
+        ctx = customer_context if customer_context is not None else self.customer_context
+        if ctx:
+            return "\n\n---\n\n".join([base_prompt, ctx]) if base_prompt else ctx
+        return base_prompt
     
     def build_messages(
         self,
@@ -125,6 +111,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        customer_context: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Build the complete message list for an LLM call.
@@ -136,14 +123,17 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             media: Optional list of local file paths for images/media.
             channel: Current channel (telegram, feishu, etc.).
             chat_id: Current chat/user ID.
+            customer_context: Optional customer context (request-scoped).
+                Falls back to self.customer_context for backwards compat.
 
         Returns:
             List of messages including system prompt.
         """
         messages = []
 
-        # System prompt
-        system_prompt = self.build_system_prompt(skill_names)
+        # System prompt (use request-scoped customer_context if provided)
+        effective_customer = customer_context if customer_context is not None else self.customer_context
+        system_prompt = self.build_system_prompt(skill_names, customer_context=effective_customer)
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})
@@ -221,18 +211,14 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         Returns:
             Updated message list.
         """
-        msg: dict[str, Any] = {"role": "assistant"}
-
-        # Always include content — some providers (e.g. StepFun) reject
-        # assistant messages that omit the key entirely.
-        msg["content"] = content
-
+        msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
+        
         if tool_calls:
             msg["tool_calls"] = tool_calls
-
-        # Include reasoning content when provided (required by some thinking models)
-        if reasoning_content is not None:
+        
+        # Thinking models reject history without this
+        if reasoning_content:
             msg["reasoning_content"] = reasoning_content
-
+        
         messages.append(msg)
         return messages

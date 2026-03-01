@@ -55,11 +55,14 @@ class SpawnTool(Tool):
             "required": ["task"],
         }
     
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self, task: str, label: str | None = None, _ctx: dict | None = None, **kwargs: Any
+    ) -> str:
         """Spawn a subagent to execute the given task."""
+        ctx = _ctx or {}
         return await self._manager.spawn(
             task=task,
             label=label,
-            origin_channel=self._origin_channel,
-            origin_chat_id=self._origin_chat_id,
+            origin_channel=ctx.get("channel") or self._origin_channel,
+            origin_chat_id=ctx.get("chat_id") or self._origin_chat_id,
         )
