@@ -13,8 +13,8 @@ import asyncio
 from aiohttp import web
 from loguru import logger
 
-from nanobot.channels.base import BaseChannel
 from nanobot.bus.queue import MessageBus
+from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import GatewayConfig
 from nanobot.webhook.routes import setup_routes
 
