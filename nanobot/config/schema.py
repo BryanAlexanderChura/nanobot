@@ -8,9 +8,16 @@ from pydantic_settings import BaseSettings
 class WhatsAppConfig(BaseModel):
     """WhatsApp channel configuration."""
     enabled: bool = False
+    provider: str = "bridge"  # "bridge" (Baileys) | "evolution" (Evolution API)
+    # Bridge provider (existing)
     bridge_url: str = "ws://localhost:3001"
     bridge_token: str = ""
-    allow_from: list[str] = Field(default_factory=list)  # Allowed phone numbers
+    # Evolution API provider
+    evolution_api_url: str = ""
+    evolution_api_key: str = ""
+    evolution_instance: str = ""
+    # Common
+    allow_from: list[str] = Field(default_factory=list)
 
 
 class TelegramConfig(BaseModel):
@@ -89,6 +96,8 @@ class GatewayConfig(BaseModel):
     """Gateway/server configuration."""
     host: str = "0.0.0.0"
     port: int = 18790
+    webhook_enabled: bool = False
+    webhook_secret: str = ""  # For CRM webhook auth (future)
 
 
 class WebSearchConfig(BaseModel):
