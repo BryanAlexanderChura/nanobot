@@ -48,13 +48,17 @@ class ChannelManager:
                 logger.warning(f"Telegram channel not available: {e}")
         
         # WhatsApp channel
-        if self.config.channels.whatsapp.enabled:
+        wa_config = self.config.channels.whatsapp
+        if wa_config.enabled:
             try:
-                from nanobot.channels.whatsapp import WhatsAppChannel
-                self.channels["whatsapp"] = WhatsAppChannel(
-                    self.config.channels.whatsapp, self.bus
-                )
-                logger.info("WhatsApp channel enabled")
+                if wa_config.provider == "evolution":
+                    from nanobot.channels.evolution import EvolutionChannel
+                    self.channels["whatsapp"] = EvolutionChannel(wa_config, self.bus)
+                    logger.info("WhatsApp channel enabled (provider=evolution)")
+                else:
+                    from nanobot.channels.whatsapp import WhatsAppChannel
+                    self.channels["whatsapp"] = WhatsAppChannel(wa_config, self.bus)
+                    logger.info("WhatsApp channel enabled (provider=bridge)")
             except ImportError as e:
                 logger.warning(f"WhatsApp channel not available: {e}")
 
