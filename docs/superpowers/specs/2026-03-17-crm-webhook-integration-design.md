@@ -176,5 +176,15 @@ Esto establece el primer contacto con valor real (boleta útil), resolviendo el 
 
 **Eventos involucrados:** `primer_pedido` + `boleta_emitida` + `pago_asignado`, combinados en un flujo unificado para clientes nuevos.
 
+### Fase 2b: Confirmación de pago recibido
+
+Cuando el operario marca un pedido como cobrado, enviar confirmación por WhatsApp al cliente. Escenarios:
+- Pago con efectivo → "Recibimos tu pago de S/X"
+- Pago con Yape → incluir info adicional del Yape (código, nombre pagador)
+- Pago mixto (efectivo + Yape) → detallar ambos métodos
+- Pago parcial → informar monto recibido y saldo restante
+
+**Evento:** `pago_recibido` — trigger cuando operario registra cobro en GAR.
+
 ### Fase 4: Conversación bidireccional
 ### Fase 5: Delivery status (leído/entregado)
