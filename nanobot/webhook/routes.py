@@ -35,20 +35,19 @@ def format_crm_event(payload: dict) -> str:
     saldo_txt = f"S/{pedido['saldo']:.2f}" if pedido.get("saldo") else "pagado"
 
     if template and template.get("contenido_renderizado"):
-        return (
-            f"EVENTO CRM: {payload['event']}. "
-            f"Envía este mensaje exacto por WhatsApp al cliente: "
-            f"{template['contenido_renderizado']}"
-        )
+        return template["contenido_renderizado"]
 
     return (
-        f"EVENTO CRM: {payload['event']}. "
-        f"Cliente: {nombre} ({cliente['nombre']}), tel: {cliente['telefono_whatsapp']}. "
-        f"Pedido {pedido['codigo']}: {prendas_txt}. "
-        f"Saldo pendiente: {saldo_txt}. "
-        f"Entrega: {pedido.get('fecha_entrega', 'no asignada')}. "
-        f"Envía un mensaje WhatsApp natural y amigable avisando que sus prendas están listas "
-        f"para recoger. Usa su nombre preferido. Si hay saldo pendiente, menciónalo con tacto."
+        f"[SISTEMA] Genera SOLO el texto del mensaje para el cliente, sin usar herramientas. "
+        f"Tu respuesta será enviada automáticamente por WhatsApp.\n\n"
+        f"Evento: {payload['event']}\n"
+        f"Cliente: {nombre} ({cliente['nombre']})\n"
+        f"Pedido {pedido['codigo']}: {prendas_txt}\n"
+        f"Saldo pendiente: {saldo_txt}\n"
+        f"Entrega: {pedido.get('fecha_entrega', 'no asignada')}\n\n"
+        f"Escribe un mensaje natural y amigable avisando que sus prendas están listas "
+        f"para recoger. Usa su nombre preferido. Si hay saldo pendiente, menciónalo con tacto. "
+        f"NO uses la herramienta message. Solo responde con el texto."
     )
 
 
