@@ -205,8 +205,9 @@ class AgentLoop:
                         ))
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
+                out_channel = msg.metadata.get("reply_channel", msg.channel)
                 await self.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel,
+                    channel=out_channel,
                     chat_id=msg.chat_id,
                     content=f"Sorry, I encountered an error: {str(e)}"
                 ))
@@ -328,10 +329,12 @@ class AgentLoop:
         session.add_message("assistant", final_content)
         await self.sessions.save(session)
         
+        out_channel = msg.metadata.get("reply_channel", msg.channel)
         return OutboundMessage(
-            channel=msg.channel,
+            channel=out_channel,
             chat_id=msg.chat_id,
-            content=final_content
+            content=final_content,
+            metadata=msg.metadata,
         )
     
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
