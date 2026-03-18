@@ -1,5 +1,6 @@
 """Webhook route handlers."""
 
+import hmac
 import json
 from collections import OrderedDict
 
@@ -163,7 +164,8 @@ async def handle_crm_webhook(request: web.Request) -> web.Response:
     config = request.app.get("config")
     secret = config.webhook_secret if config else ""
     auth = request.headers.get("Authorization", "")
-    if not secret or auth != f"Bearer {secret}":
+    expected = f"Bearer {secret}"
+    if not secret or not hmac.compare_digest(auth, expected):
         return web.json_response(
             {"status": "error", "error": "Invalid webhook secret"},
             status=401,
