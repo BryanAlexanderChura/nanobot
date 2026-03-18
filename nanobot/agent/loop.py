@@ -202,6 +202,7 @@ class AgentLoop:
                             channel=response.channel,
                             chat_id=response.chat_id,
                             content=chunk,
+                            metadata=response.metadata,
                         ))
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
