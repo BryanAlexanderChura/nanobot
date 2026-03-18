@@ -38,16 +38,14 @@ def format_crm_event(payload: dict) -> str:
         return template["contenido_renderizado"]
 
     return (
-        f"[SISTEMA] Genera SOLO el texto del mensaje para el cliente, sin usar herramientas. "
-        f"Tu respuesta será enviada automáticamente por WhatsApp.\n\n"
+        f"Genera el mensaje para el cliente. Tu respuesta se enviará automáticamente por WhatsApp.\n\n"
         f"Evento: {payload['event']}\n"
         f"Cliente: {nombre} ({cliente['nombre']})\n"
         f"Pedido {pedido['codigo']}: {prendas_txt}\n"
         f"Saldo pendiente: {saldo_txt}\n"
         f"Entrega: {pedido.get('fecha_entrega', 'no asignada')}\n\n"
         f"Escribe un mensaje natural y amigable avisando que sus prendas están listas "
-        f"para recoger. Usa su nombre preferido. Si hay saldo pendiente, menciónalo con tacto. "
-        f"NO uses la herramienta message. Solo responde con el texto."
+        f"para recoger. Usa su nombre preferido. Si hay saldo pendiente, menciónalo con tacto."
     )
 
 

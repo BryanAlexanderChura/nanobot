@@ -280,10 +280,14 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             
-            # Call LLM
+            # Call LLM (exclude message tool for crm_event to force direct response)
+            tool_defs = self.tools.get_definitions()
+            if msg.channel == "crm_event":
+                tool_defs = [t for t in tool_defs if t.get("function", {}).get("name") != "message"]
+
             response = await self.provider.chat(
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=tool_defs,
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
