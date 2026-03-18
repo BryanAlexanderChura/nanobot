@@ -11,6 +11,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Config
+from nanobot.integrations.supabase import SupabaseCRMClient
 
 
 class ChannelManager:
@@ -28,7 +29,11 @@ class ChannelManager:
         self.bus = bus
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
-        
+        self._crm_client = SupabaseCRMClient(
+            url=config.tools.supabase.url,
+            service_key=config.tools.supabase.service_key,
+        )
+
         self._init_channels()
     
     def _init_channels(self) -> None:
@@ -176,6 +181,9 @@ class ChannelManager:
             except asyncio.CancelledError:
                 pass
         
+        # Close Supabase client
+        await self._crm_client.close()
+
         # Stop all channels
         for name, channel in self.channels.items():
             try:
@@ -200,8 +208,25 @@ class ChannelManager:
                     try:
                         logger.info(f"Outbound → {msg.channel}:{msg.chat_id} | {msg.content[:200]}")
                         await channel.send(msg)
+
+                        # Update crm_mensajes if this was a CRM-triggered message
+                        crm_id = (msg.metadata or {}).get("crm_mensaje_id")
+                        if crm_id and self._crm_client.enabled:
+                            await self._crm_client.mark_sent(
+                                crm_mensaje_id=crm_id,
+                                evolution_msg_id="",
+                                mensaje_generado=msg.content,
+                            )
                     except Exception as e:
                         logger.error(f"Error sending to {msg.channel}: {e}")
+
+                        # Mark CRM message as failed
+                        crm_id = (msg.metadata or {}).get("crm_mensaje_id")
+                        if crm_id and self._crm_client.enabled:
+                            await self._crm_client.mark_failed(
+                                crm_mensaje_id=crm_id,
+                                error=str(e),
+                            )
                 else:
                     logger.warning(f"Unknown channel: {msg.channel}")
                     
