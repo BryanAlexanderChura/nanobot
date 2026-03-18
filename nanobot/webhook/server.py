@@ -37,6 +37,7 @@ async def start_webhook_server(
     app = web.Application()
     app["bus"] = bus
     app["channels"] = channels
+    app["config"] = config
 
     setup_routes(app)
 
