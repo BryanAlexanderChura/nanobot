@@ -6,14 +6,55 @@ from collections import OrderedDict
 from aiohttp import web
 from loguru import logger
 
+from nanobot.bus.events import InboundMessage
+
 # Deduplication buffer: Evolution API may send the same message multiple times
 _processed_ids: OrderedDict[str, None] = OrderedDict()
 _MAX_DEDUP = 1000
 
 
+def phone_to_jid(phone: str) -> str:
+    """Convert E.164 phone to WhatsApp JID. '+51987654321' → '51987654321@s.whatsapp.net'"""
+    number = phone.replace("+", "").replace(" ", "").replace("-", "")
+    return f"{number}@s.whatsapp.net"
+
+
+def format_crm_event(payload: dict) -> str:
+    """Format CRM event payload into a prompt for the agent."""
+    data = payload["data"]
+    cliente = data["cliente"]
+    pedido = data["pedido"]
+    prendas = data.get("prendas", [])
+    template = data.get("template_sugerido")
+
+    nombre = cliente.get("nombre_preferido") or cliente["nombre"]
+    prendas_txt = ", ".join(
+        f"{p['cantidad']}x {p['servicio']}" for p in prendas
+    )
+    saldo_txt = f"S/{pedido['saldo']:.2f}" if pedido.get("saldo") else "pagado"
+
+    if template and template.get("contenido_renderizado"):
+        return (
+            f"EVENTO CRM: {payload['event']}. "
+            f"Envía este mensaje exacto por WhatsApp al cliente: "
+            f"{template['contenido_renderizado']}"
+        )
+
+    return (
+        f"EVENTO CRM: {payload['event']}. "
+        f"Cliente: {nombre} ({cliente['nombre']}), tel: {cliente['telefono_whatsapp']}. "
+        f"Pedido {pedido['codigo']}: {prendas_txt}. "
+        f"Saldo pendiente: {saldo_txt}. "
+        f"Entrega: {pedido.get('fecha_entrega', 'no asignada')}. "
+        f"Envía un mensaje WhatsApp natural y amigable avisando que sus prendas están listas "
+        f"para recoger. Usa su nombre preferido. Si hay saldo pendiente, menciónalo con tacto."
+    )
+
+
 def setup_routes(app: web.Application) -> None:
     """Register all webhook routes."""
     app.router.add_post("/webhook/evolution", handle_evolution_webhook)
+    app.router.add_post("/webhook/crm", handle_crm_webhook)
 
 
 async def handle_evolution_webhook(request: web.Request) -> web.Response:
@@ -114,3 +155,74 @@ async def handle_evolution_webhook(request: web.Request) -> web.Response:
     )
 
     return web.json_response({"status": "ok"})
+
+
+async def handle_crm_webhook(request: web.Request) -> web.Response:
+    """Handle incoming CRM events from GAR."""
+    # Auth check (fail-closed: reject if no secret configured)
+    config = request.app.get("config")
+    secret = config.webhook_secret if config else ""
+    auth = request.headers.get("Authorization", "")
+    if not secret or auth != f"Bearer {secret}":
+        return web.json_response(
+            {"status": "error", "error": "Invalid webhook secret"},
+            status=401,
+        )
+
+    # Parse JSON
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response(
+            {"status": "error", "error": "Invalid JSON"},
+            status=400,
+        )
+
+    # Validate required fields
+    data = payload.get("data", {})
+    cliente = data.get("cliente", {})
+    phone = cliente.get("telefono_whatsapp")
+    crm_mensaje_id = data.get("crm_mensaje_id")
+
+    if not phone:
+        return web.json_response(
+            {"status": "error", "error": "Missing required field: data.cliente.telefono_whatsapp"},
+            status=400,
+        )
+    if not crm_mensaje_id:
+        return web.json_response(
+            {"status": "error", "error": "Missing required field: data.crm_mensaje_id"},
+            status=400,
+        )
+
+    # Build InboundMessage
+    event_type = payload.get("event", "unknown")
+    content = format_crm_event(payload)
+
+    msg = InboundMessage(
+        channel="crm_event",
+        sender_id="crm_system",
+        chat_id=phone_to_jid(phone),
+        content=content,
+        metadata={
+            "event_type": event_type,
+            "crm_mensaje_id": crm_mensaje_id,
+            "reply_channel": "whatsapp",
+            "cliente": cliente,
+            "pedido": data.get("pedido", {}),
+            "prendas": data.get("prendas", []),
+            "template_sugerido": (data.get("template_sugerido") or {}).get(
+                "contenido_renderizado"
+            ),
+        },
+    )
+
+    bus = request.app["bus"]
+    await bus.publish_inbound(msg)
+
+    logger.info("CRM webhook accepted: event={} crm_id={}", event_type, crm_mensaje_id)
+
+    return web.json_response(
+        {"status": "accepted", "crm_mensaje_id": crm_mensaje_id},
+        status=202,
+    )
