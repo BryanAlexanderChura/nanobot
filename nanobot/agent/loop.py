@@ -240,15 +240,8 @@ class AgentLoop:
         # Request-scoped context: isolated per message, no shared mutable state
         request_ctx = {"channel": msg.channel, "chat_id": msg.chat_id}
 
-        # Resolve customer context if supabase tool is active
+        # Customer context (disabled — will be re-enabled with GAR CRM integration)
         customer_context = ""
-        if self._supabase_tool and self.tools.get("consulta"):
-            try:
-                customer_context = await self._supabase_tool.build_customer_context(
-                    msg.chat_id
-                )
-            except Exception as e:
-                logger.warning(f"Customer lookup failed: {e}")
 
         # Legacy: also set_context for backwards compat (CLI, single-user)
         message_tool = self.tools.get("message")

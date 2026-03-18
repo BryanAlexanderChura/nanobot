@@ -1,6 +1,7 @@
 """WhatsApp channel implementation using Evolution API."""
 
 import asyncio
+import re
 
 import httpx
 from loguru import logger
@@ -9,6 +10,9 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import WhatsAppConfig
+
+# Max chars per WhatsApp message before splitting
+_MAX_CHUNK = 1500
 
 
 class EvolutionChannel(BaseChannel):
@@ -45,19 +49,30 @@ class EvolutionChannel(BaseChannel):
         await self._stop_event.wait()
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a text message via Evolution API."""
+        """Send message via Evolution API, splitting long texts into chunks."""
         number = self._jid_to_number(msg.chat_id)
+        chunks = self._split_message(msg.content)
+
+        for chunk in chunks:
+            await self._send_text(number, chunk)
+            if len(chunks) > 1:
+                await asyncio.sleep(0.8)  # Small delay between chunks
+
+    async def _send_text(self, number: str, text: str) -> None:
+        """Send a single text message to a number."""
+        if not text or not text.strip():
+            return
 
         if self._mock_mode:
-            logger.info("[EvolutionChannel MOCK] → {}: {}", number, msg.content[:200])
+            logger.info("[EvolutionChannel MOCK] → {}: {}", number, text[:200])
             return
 
         try:
             resp = await self._client.post(
                 f"/message/sendText/{self.config.evolution_instance}",
-                json={"number": number, "text": msg.content},
+                json={"number": number, "text": text},
             )
-            if resp.status_code != 200:
+            if resp.status_code not in (200, 201):
                 logger.error(
                     "Evolution API error {}: {}", resp.status_code, resp.text[:200]
                 )
@@ -77,3 +92,45 @@ class EvolutionChannel(BaseChannel):
         '51987654321@s.whatsapp.net' → '51987654321'
         """
         return jid.split("@")[0]
+
+    @staticmethod
+    def _split_message(text: str) -> list[str]:
+        """Split long text into WhatsApp-friendly chunks.
+
+        Splits on double newlines (paragraphs) first, then on single newlines,
+        keeping each chunk under _MAX_CHUNK characters.
+        """
+        if len(text) <= _MAX_CHUNK:
+            return [text]
+
+        # Split on double newlines (paragraphs)
+        paragraphs = re.split(r"\n\n+", text)
+        chunks: list[str] = []
+        current = ""
+
+        for para in paragraphs:
+            candidate = f"{current}\n\n{para}" if current else para
+            if len(candidate) <= _MAX_CHUNK:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current.strip())
+                # If single paragraph is too long, split on newlines
+                if len(para) > _MAX_CHUNK:
+                    lines = para.split("\n")
+                    current = ""
+                    for line in lines:
+                        candidate = f"{current}\n{line}" if current else line
+                        if len(candidate) <= _MAX_CHUNK:
+                            current = candidate
+                        else:
+                            if current:
+                                chunks.append(current.strip())
+                            current = line
+                else:
+                    current = para
+
+        if current:
+            chunks.append(current.strip())
+
+        return chunks if chunks else [text]

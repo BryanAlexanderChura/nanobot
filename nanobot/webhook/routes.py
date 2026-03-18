@@ -1,9 +1,14 @@
 """Webhook route handlers."""
 
 import json
+from collections import OrderedDict
 
 from aiohttp import web
 from loguru import logger
+
+# Deduplication buffer: Evolution API may send the same message multiple times
+_processed_ids: OrderedDict[str, None] = OrderedDict()
+_MAX_DEDUP = 1000
 
 
 def setup_routes(app: web.Application) -> None:
@@ -26,13 +31,16 @@ async def handle_evolution_webhook(request: web.Request) -> web.Response:
 
     event = payload.get("event", "")
 
+    # Normalize event name: v2.2 uses "MESSAGES_UPSERT", v2.3+ uses "messages.upsert"
+    event_normalized = event.upper().replace(".", "_")
+
     # Log non-message events for operational visibility
-    if event in ("CONNECTION_UPDATE", "QRCODE_UPDATED"):
+    if event_normalized in ("CONNECTION_UPDATE", "QRCODE_UPDATED"):
         logger.info("Evolution webhook event: {} | {}", event, payload.get("data", {}))
         return web.json_response({"status": "ok"})
 
     # Only process message events
-    if event != "MESSAGES_UPSERT":
+    if event_normalized != "MESSAGES_UPSERT":
         return web.json_response({"status": "ignored"})
 
     # Validate required fields
@@ -56,8 +64,21 @@ async def handle_evolution_webhook(request: web.Request) -> web.Response:
     if remote_jid == "status@broadcast":
         return web.json_response({"status": "ignored"})
 
-    # Extract content (Phase 1: only conversation text)
-    content = message.get("conversation", "")
+    # Deduplicate: Evolution API often sends the same message multiple times
+    msg_id = key.get("id", "")
+    if msg_id:
+        if msg_id in _processed_ids:
+            return web.json_response({"status": "duplicate"})
+        _processed_ids[msg_id] = None
+        while len(_processed_ids) > _MAX_DEDUP:
+            _processed_ids.popitem(last=False)
+
+    # Extract text content from different message types
+    content = (
+        message.get("conversation")
+        or (message.get("extendedTextMessage") or {}).get("text")
+        or ""
+    )
 
     # Determine message type from payload keys
     message_type = "conversation"
@@ -84,7 +105,7 @@ async def handle_evolution_webhook(request: web.Request) -> web.Response:
         content=content,
         media=[],
         metadata={
-            "message_id": key.get("id", ""),
+            "message_id": msg_id,
             "push_name": data.get("pushName", ""),
             "instance": payload.get("instance", ""),
             "message_type": message_type,
