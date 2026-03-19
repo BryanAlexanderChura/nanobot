@@ -49,17 +49,10 @@ class EvolutionChannel(BaseChannel):
         await self._stop_event.wait()
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send message via Evolution API, splitting long texts into chunks.
-
-        Returns the last Evolution message ID (stored in msg.metadata for CRM tracking).
-        """
+        """Send message via Evolution API: text chunks first, then media attachments."""
         number = self._jid_to_number(msg.chat_id)
 
-        # Send media attachments first (PDFs, images, etc.)
-        for media_path in (msg.media or []):
-            await self._send_media(number, media_path)
-
-        # Send text content
+        # 1. Send text content first
         chunks = self._split_message(msg.content)
         last_msg_id = ""
         for chunk in chunks:
@@ -67,7 +60,15 @@ class EvolutionChannel(BaseChannel):
             if msg_id:
                 last_msg_id = msg_id
             if len(chunks) > 1:
-                await asyncio.sleep(0.8)  # Small delay between chunks
+                await asyncio.sleep(0.8)
+
+        # 2. Send media attachments after text (PDFs, images, etc.)
+        for media_path in (msg.media or []):
+            if chunks:
+                await asyncio.sleep(0.8)
+            msg_id = await self._send_media(number, media_path)
+            if msg_id:
+                last_msg_id = msg_id
 
         # Store Evolution message ID in metadata for CRM tracking
         if last_msg_id:
@@ -100,7 +101,10 @@ class EvolutionChannel(BaseChannel):
             return ""
 
     async def _send_media(self, number: str, media_path: str) -> str:
-        """Send a media file (PDF, image, etc.) via Evolution API. Returns message ID."""
+        """Send a media file (PDF, image, etc.) via Evolution API.
+
+        Supports both local file paths (read as base64) and public URLs (passed directly).
+        """
         if self._mock_mode:
             logger.info("[EvolutionChannel MOCK] media → {}: {}", number, media_path)
             return ""
@@ -108,11 +112,25 @@ class EvolutionChannel(BaseChannel):
         import mimetypes
         import os
 
-        mime, _ = mimetypes.guess_type(media_path)
-        mime = mime or "application/octet-stream"
-        filename = os.path.basename(media_path)
+        is_url = media_path.startswith("http://") or media_path.startswith("https://")
 
-        # Determine media type for Evolution API
+        if is_url:
+            mime = "application/pdf"
+            filename = media_path.split("/")[-1].split("?")[0]
+            media_value = media_path
+        else:
+            mime, _ = mimetypes.guess_type(media_path)
+            mime = mime or "application/octet-stream"
+            filename = os.path.basename(media_path)
+            try:
+                import base64
+                with open(media_path, "rb") as f:
+                    raw = base64.b64encode(f.read()).decode()
+                media_value = f"data:{mime};base64,{raw}"
+            except FileNotFoundError:
+                logger.error("Media file not found: {}", media_path)
+                return ""
+
         if mime.startswith("image/"):
             media_type = "image"
         elif mime.startswith("audio/"):
@@ -123,10 +141,6 @@ class EvolutionChannel(BaseChannel):
             media_type = "document"
 
         try:
-            import base64
-            with open(media_path, "rb") as f:
-                media_b64 = base64.b64encode(f.read()).decode()
-
             resp = await self._client.post(
                 f"/message/sendMedia/{self.config.evolution_instance}",
                 json={
@@ -134,7 +148,7 @@ class EvolutionChannel(BaseChannel):
                     "mediatype": media_type,
                     "mimetype": mime,
                     "fileName": filename,
-                    "media": f"data:{mime};base64,{media_b64}",
+                    "media": media_value,
                 },
             )
             if resp.status_code not in (200, 201):
@@ -144,9 +158,6 @@ class EvolutionChannel(BaseChannel):
                 return ""
             data = resp.json()
             return data.get("key", {}).get("id", "")
-        except FileNotFoundError:
-            logger.error("Media file not found: {}", media_path)
-            return ""
         except Exception as e:
             logger.error("Failed to send media via Evolution API: {}", e)
             return ""
