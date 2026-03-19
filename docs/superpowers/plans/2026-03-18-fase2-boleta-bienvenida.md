@@ -1,10 +1,10 @@
-# Fase 2: Boleta + Bienvenida — Implementation Plan
+# Fase 2: Boleta + Bienvenida — Implementation Plan (Templates)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When an operator creates an order in GAR and the boleta is emitted via Rapifac, the customer receives a WhatsApp message (welcome or thank you) followed by the boleta PDF.
+**Goal:** When an operator creates an order in GAR and the boleta is emitted via Rapifac, the customer receives a WhatsApp message (welcome or thank you) followed by the boleta PDF. Messages use pre-defined templates — no LLM tokens consumed.
 
-**Architecture:** GAR emits `boleta_emitida` event via Edge Function → Nanobot webhook formats prompt → AgentLoop generates multi-block message with `|||` → EvolutionChannel sends text chunks then PDF via `sendMedia` with URL passthrough.
+**Architecture:** GAR renders the template in the Edge Function using `template_sugerido.contenido_renderizado` → Nanobot receives it, skips LLM, forwards text + PDF via Evolution API. Template rotation via `ultimo_indice_plantilla` prevents spam.
 
 **Tech Stack:** Python 3.11+ (aiohttp, httpx), TypeScript/Deno (Supabase Edge Functions), Evolution API v2.3.7
 
@@ -16,25 +16,24 @@
 
 | Repo | File | Responsibility |
 |------|------|----------------|
-| Nanobot | `nanobot/webhook/routes.py` | Modify: add `boleta_emitida` branch in `format_crm_event()`, forward `boleta`/`es_primer_pedido` in metadata |
+| Nanobot | `nanobot/webhook/routes.py` | Modify: forward `boleta` and `es_primer_pedido` in metadata |
 | Nanobot | `nanobot/channels/evolution.py` | Modify: URL passthrough in `_send_media()`, reorder `send()` text-first |
 | Nanobot | `nanobot/agent/loop.py` | Modify: attach PDF media to last outbound chunk |
-| Nanobot | `workspace/agents/lavanderia/SOUL.md` | Modify: strengthen `|||` instruction for all message types |
-| Nanobot | `tests/test_crm_webhook.py` | Modify: add `boleta_emitida` format tests |
-| Nanobot | `tests/test_evolution.py` | Modify: add URL media test |
-| GAR | `supabase/functions/notify-nanobot/index.ts` | Modify: add `boleta_emitida` event case |
+| Nanobot | `workspace/agents/lavanderia/SOUL.md` | Modify: strengthen `|||` instruction |
+| Nanobot | `tests/test_crm_webhook.py` | Modify: add boleta metadata forwarding test |
+| GAR | `supabase/functions/notify-nanobot/index.ts` | Modify: add `boleta_emitida` case with template rendering |
 | GAR | Hook that calls `emitir-boleta` | Modify: trigger notification after successful emission |
-| GAR | `supabase/migrations/` | Create: migration to update unique index on `crm_mensajes` |
+| GAR | `supabase/migrations/` | Create: update unique index on `crm_mensajes` |
 
 ---
 
-## Task 1: `format_crm_event()` — boleta_emitida branch
+## Task 1: Forward boleta metadata in webhook handler
 
 **Files:**
-- Modify: `nanobot/webhook/routes.py:24-50`
+- Modify: `nanobot/webhook/routes.py:218-228`
 - Test: `tests/test_crm_webhook.py`
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: Write failing test**
 
 Add to `tests/test_crm_webhook.py`:
 
@@ -65,139 +64,66 @@ def _make_boleta_payload(es_primer_pedido=True, crm_id="test-boleta-uuid"):
             },
             "es_primer_pedido": es_primer_pedido,
             "crm_mensaje_id": crm_id,
+            "template_sugerido": {
+                "contenido_renderizado": "¡Hola Marita! Bienvenida a El Chinito Veloz\n|||\nAquí tienes tu boleta B001-00001234"
+            },
         },
     }
 
 
-class TestFormatBoletaEmitida:
-    """Test format_crm_event for boleta_emitida events."""
+class TestBoletaEmitida:
+    """Test boleta_emitida event handling."""
 
-    def test_primer_pedido_includes_bienvenida(self):
-        from nanobot.webhook.routes import format_crm_event
-        result = format_crm_event(_make_boleta_payload(es_primer_pedido=True))
-        assert "boleta_emitida" in result
-        assert "Marita" in result
-        assert "BIENVENIDA" in result
-        assert "B001-00001234" in result
-        assert "|||" in result
+    @pytest.fixture
+    def bus(self):
+        return MessageBus()
 
-    def test_cliente_recurrente_includes_agradecimiento(self):
-        from nanobot.webhook.routes import format_crm_event
-        result = format_crm_event(_make_boleta_payload(es_primer_pedido=False))
-        assert "AGRADECIMIENTO" in result
-        assert "Marita" in result
-        assert "B001-00001234" in result
+    @pytest.fixture
+    def app(self, bus):
+        from nanobot.webhook.routes import setup_routes
+        application = web.Application()
+        application["bus"] = bus
+        application["channels"] = {}
+        application["config"] = GatewayConfig(webhook_secret="test-secret")
+        setup_routes(application)
+        return application
 
-    def test_boleta_includes_importe(self):
-        from nanobot.webhook.routes import format_crm_event
-        result = format_crm_event(_make_boleta_payload())
-        assert "45.00" in result
+    @pytest.mark.asyncio
+    async def test_boleta_forwards_metadata(self, aiohttp_client, app, bus):
+        crm_id = f"test-boleta-{uuid.uuid4()}"
+        client = await aiohttp_client(app)
+        await client.post(
+            "/webhook/crm",
+            json=_make_boleta_payload(crm_id=crm_id),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        assert msg.metadata["event_type"] == "boleta_emitida"
+        assert msg.metadata["boleta"]["enlace_pdf"] == "https://rapifac.com/boletas/xxx.pdf"
+        assert msg.metadata["es_primer_pedido"] is True
+
+    @pytest.mark.asyncio
+    async def test_boleta_uses_template_as_content(self, aiohttp_client, app, bus):
+        crm_id = f"test-boleta-{uuid.uuid4()}"
+        client = await aiohttp_client(app)
+        await client.post(
+            "/webhook/crm",
+            json=_make_boleta_payload(crm_id=crm_id),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        # Template should be used as content (no LLM needed)
+        assert "Bienvenida a El Chinito Veloz" in msg.content
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_crm_webhook.py::TestFormatBoletaEmitida -v`
-Expected: FAIL — `format_crm_event()` has no `boleta_emitida` branch, will produce wrong output
-
-- [ ] **Step 3: Add boleta_emitida branch to `format_crm_event()`**
-
-In `nanobot/webhook/routes.py`, modify `format_crm_event()` (line 24-50). Add at the top of the function, after `nombre` is derived (line 32), before the `prendas_txt` line:
-
-```python
-def format_crm_event(payload: dict) -> str:
-    """Format CRM event payload into a prompt for the agent."""
-    data = payload["data"]
-    cliente = data["cliente"]
-    pedido = data["pedido"]
-    nombre = cliente.get("nombre_preferido") or cliente["nombre"]
-
-    # Route by event type
-    if payload["event"] == "boleta_emitida":
-        boleta = data.get("boleta", {})
-        es_primer_pedido = data.get("es_primer_pedido", False)
-        tipo_cliente = "BIENVENIDA (primer pedido)" if es_primer_pedido else "AGRADECIMIENTO (cliente recurrente)"
-        return (
-            f"Genera el mensaje para el cliente. Tu respuesta se enviará automáticamente por WhatsApp.\n\n"
-            f"Evento: boleta_emitida\n"
-            f"Cliente: {nombre} ({cliente['nombre']})\n"
-            f"Tipo: {tipo_cliente}\n"
-            f"Pedido: {pedido['codigo']} — S/{pedido.get('importe', 0):.2f}\n"
-            f"Boleta: {boleta.get('codigo_completo', '')}\n"
-            f"Entrega estimada: {pedido.get('fecha_entrega', 'no asignada')}\n\n"
-            f"Usa ||| para separar en dos bloques:\n"
-            f"Bloque 1: {'Bienvenida cálida al nuevo cliente' if es_primer_pedido else 'Agradecimiento por su preferencia'}.\n"
-            f"Bloque 2: Referencia breve a la boleta (código y monto). El PDF se adjunta automáticamente después."
-        )
-
-    # Default: prenda_terminada (existing logic)
-    prendas = data.get("prendas", [])
-    template = data.get("template_sugerido")
-    prendas_txt = ", ".join(f"{p['cantidad']}x {p['servicio']}" for p in prendas)
-    saldo_txt = f"S/{pedido['saldo']:.2f}" if pedido.get("saldo") else "pagado"
-
-    if template and template.get("contenido_renderizado"):
-        return template["contenido_renderizado"]
-
-    return (
-        f"Genera el mensaje para el cliente. Tu respuesta se enviará automáticamente por WhatsApp.\n\n"
-        f"Evento: {payload['event']}\n"
-        f"Cliente: {nombre} ({cliente['nombre']})\n"
-        f"Pedido {pedido['codigo']}: {prendas_txt}\n"
-        f"Saldo pendiente: {saldo_txt}\n"
-        f"Entrega: {pedido.get('fecha_entrega', 'no asignada')}\n\n"
-        f"Escribe un mensaje natural y amigable avisando que sus prendas están listas "
-        f"para recoger. Usa su nombre preferido. Si hay saldo pendiente, menciónalo con tacto."
-    )
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `pytest tests/test_crm_webhook.py -v`
-Expected: All PASS (new + existing)
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add nanobot/webhook/routes.py tests/test_crm_webhook.py
-git commit -m "feat: add boleta_emitida branch in format_crm_event"
-```
-
----
-
-## Task 2: Forward boleta metadata in webhook handler
-
-**Files:**
-- Modify: `nanobot/webhook/routes.py:218-228`
-- Test: `tests/test_crm_webhook.py`
-
-- [ ] **Step 1: Write failing test**
-
-Add to `tests/test_crm_webhook.py` in `TestCRMWebhook`:
-
-```python
-@pytest.mark.asyncio
-async def test_boleta_event_forwards_metadata(self, aiohttp_client, app, bus):
-    crm_id = f"test-boleta-{uuid.uuid4()}"
-    client = await aiohttp_client(app)
-    await client.post(
-        "/webhook/crm",
-        json=_make_boleta_payload(crm_id=crm_id),
-        headers={"Authorization": "Bearer test-secret"},
-    )
-    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-    assert msg.metadata["event_type"] == "boleta_emitida"
-    assert msg.metadata["boleta"]["enlace_pdf"] == "https://rapifac.com/boletas/xxx.pdf"
-    assert msg.metadata["es_primer_pedido"] is True
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pytest tests/test_crm_webhook.py::TestCRMWebhook::test_boleta_event_forwards_metadata -v`
+Run: `pytest tests/test_crm_webhook.py::TestBoletaEmitida -v`
 Expected: FAIL — `boleta` and `es_primer_pedido` not in metadata
 
 - [ ] **Step 3: Add boleta/es_primer_pedido to metadata in `handle_crm_webhook()`**
 
-In `nanobot/webhook/routes.py`, modify the metadata dict in `InboundMessage` (lines 218-228). Add two fields:
+In `nanobot/webhook/routes.py`, modify the metadata dict (lines 218-228):
 
 ```python
     msg = InboundMessage(
@@ -221,7 +147,7 @@ In `nanobot/webhook/routes.py`, modify the metadata dict in `InboundMessage` (li
     )
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Run tests**
 
 Run: `pytest tests/test_crm_webhook.py -v`
 Expected: All PASS
@@ -235,13 +161,13 @@ git commit -m "feat: forward boleta and es_primer_pedido in CRM webhook metadata
 
 ---
 
-## Task 3: EvolutionChannel — URL passthrough in `_send_media()` + reorder `send()`
+## Task 2: EvolutionChannel — URL passthrough + text-before-media
 
 **Files:**
 - Modify: `nanobot/channels/evolution.py:51-74` (send) and `102-152` (_send_media)
 - Test: `tests/test_evolution.py`
 
-- [ ] **Step 1: Write failing test for URL passthrough**
+- [ ] **Step 1: Write test for URL passthrough**
 
 Add to `tests/test_evolution.py`:
 
@@ -261,15 +187,14 @@ class TestEvolutionMediaURL:
         return EvolutionChannel(config, MessageBus())
 
     @pytest.mark.asyncio
-    async def test_send_media_url_logs_in_mock(self):
+    async def test_send_media_url_mock(self):
         channel = self._make_channel()
         result = await channel._send_media("51987654321", "https://rapifac.com/boletas/test.pdf")
-        # Mock mode just logs, returns empty
-        assert result == ""
+        assert result == ""  # Mock mode logs, returns empty
 
     @pytest.mark.asyncio
-    async def test_send_order_text_before_media(self):
-        """send() should send text before media."""
+    async def test_send_text_before_media(self):
+        """send() should not crash with URL media in mock mode."""
         channel = self._make_channel()
         from nanobot.bus.events import OutboundMessage
         msg = OutboundMessage(
@@ -278,22 +203,16 @@ class TestEvolutionMediaURL:
             content="Hello",
             media=["https://rapifac.com/test.pdf"],
         )
-        # In mock mode this just logs — verify no crash
-        await channel.send(msg)
+        await channel.send(msg)  # Should not crash
 ```
 
-- [ ] **Step 2: Run tests to verify baseline**
+- [ ] **Step 2: Modify `_send_media()` for URL passthrough**
 
-Run: `pytest tests/test_evolution.py::TestEvolutionMediaURL -v`
-Expected: May pass (mock mode), but serves as regression baseline
-
-- [ ] **Step 3: Modify `_send_media()` for URL passthrough**
-
-In `nanobot/channels/evolution.py`, replace `_send_media()` (lines 102-152):
+Replace `_send_media()` in `nanobot/channels/evolution.py` (lines 102-152):
 
 ```python
 async def _send_media(self, number: str, media_path: str) -> str:
-    """Send a media file (PDF, image, etc.) via Evolution API. Returns message ID.
+    """Send a media file (PDF, image, etc.) via Evolution API.
 
     Supports both local file paths (read as base64) and public URLs (passed directly).
     """
@@ -307,7 +226,7 @@ async def _send_media(self, number: str, media_path: str) -> str:
     is_url = media_path.startswith("http://") or media_path.startswith("https://")
 
     if is_url:
-        mime = "application/pdf"  # Default for URLs; Evolution detects from content
+        mime = "application/pdf"
         filename = media_path.split("/")[-1].split("?")[0]
         media_value = media_path
     else:
@@ -323,7 +242,6 @@ async def _send_media(self, number: str, media_path: str) -> str:
             logger.error("Media file not found: {}", media_path)
             return ""
 
-    # Determine media type
     if mime.startswith("image/"):
         media_type = "image"
     elif mime.startswith("audio/"):
@@ -356,9 +274,9 @@ async def _send_media(self, number: str, media_path: str) -> str:
         return ""
 ```
 
-- [ ] **Step 4: Reorder `send()` — text first, media last**
+- [ ] **Step 3: Reorder `send()` — text first, media last**
 
-In `nanobot/channels/evolution.py`, replace `send()` (lines 51-74):
+Replace `send()` in `nanobot/channels/evolution.py` (lines 51-74):
 
 ```python
 async def send(self, msg: OutboundMessage) -> None:
@@ -388,12 +306,12 @@ async def send(self, msg: OutboundMessage) -> None:
         msg.metadata["evolution_msg_id"] = last_msg_id
 ```
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 4: Run tests**
 
 Run: `pytest tests/test_evolution.py -v`
 Expected: All PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add nanobot/channels/evolution.py tests/test_evolution.py
@@ -402,21 +320,20 @@ git commit -m "feat: URL passthrough in _send_media + text-before-media ordering
 
 ---
 
-## Task 4: AgentLoop — attach PDF to last outbound chunk
+## Task 3: AgentLoop — attach PDF to last outbound chunk
 
 **Files:**
 - Modify: `nanobot/agent/loop.py:196-206`
 
 - [ ] **Step 1: Modify chunk dispatch to include media on last chunk**
 
-In `nanobot/agent/loop.py`, replace lines 196-206 (the chunk dispatch block inside `_handle_message`):
+In `nanobot/agent/loop.py`, replace lines 196-206:
 
 ```python
             try:
                 response = await self._process_message(msg)
                 if response:
                     chunks = _split_chunks(response.content)
-                    # Collect media from metadata (e.g., boleta PDF URL)
                     boleta_pdf = (msg.metadata.get("boleta") or {}).get("enlace_pdf", "")
                     media_list = [boleta_pdf] if boleta_pdf else []
 
@@ -433,7 +350,7 @@ In `nanobot/agent/loop.py`, replace lines 196-206 (the chunk dispatch block insi
                         ))
 ```
 
-- [ ] **Step 2: Run existing tests for regression**
+- [ ] **Step 2: Run tests for regression**
 
 Run: `pytest tests/ --ignore=tests/test_commands.py --ignore=tests/test_consolidate_offset.py -v`
 Expected: All PASS
@@ -447,14 +364,14 @@ git commit -m "feat: attach PDF media to last outbound chunk in agent loop"
 
 ---
 
-## Task 5: Strengthen `|||` instruction in SOUL.md
+## Task 4: Strengthen `|||` instruction in SOUL.md
 
 **Files:**
 - Modify: `workspace/agents/lavanderia/SOUL.md:46-48`
 
-- [ ] **Step 1: Update SOUL.md format section**
+- [ ] **Step 1: Update format section**
 
-Replace the current `## Formato` section (line 46-48) with:
+Replace the `## Formato` section (line 46-48):
 
 ```markdown
 ## Formato
@@ -476,7 +393,7 @@ git commit -m "feat: strengthen ||| message splitting instruction in SOUL.md"
 
 ---
 
-## Task 6: GAR — Migration to update crm_mensajes unique index
+## Task 5: GAR — Migration to update crm_mensajes unique index
 
 **Files:**
 - Create: `C:\Users\fanny\OneDrive\Documentos\GitHub\gar\supabase\migrations\20260318_crm_mensajes_multi_evento.sql`
@@ -485,9 +402,6 @@ git commit -m "feat: strengthen ||| message splitting instruction in SOUL.md"
 
 ```sql
 -- Allow multiple pending CRM messages per pedido (one per event type)
--- Previously: only 1 pending message per pedido
--- Now: 1 pending per pedido+tipo combination (boleta_emitida + prenda_terminada can coexist)
-
 DROP INDEX IF EXISTS idx_crm_mensajes_pedido_unico;
 
 CREATE UNIQUE INDEX idx_crm_mensajes_pedido_evento_unico
@@ -497,18 +411,7 @@ WHERE estado_envio = 'pendiente' AND pedido_id IS NOT NULL;
 
 - [ ] **Step 2: Apply via Supabase CLI or Dashboard**
 
-Option A (CLI): `cd gar && npx supabase db push`
-Option B (Dashboard): Copy SQL into Supabase SQL Editor and execute
-
-- [ ] **Step 3: Verify index exists**
-
-Run in Supabase SQL Editor:
-```sql
-SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'crm_mensajes';
-```
-Expected: `idx_crm_mensajes_pedido_evento_unico` visible with `(pedido_id, tipo)` columns
-
-- [ ] **Step 4: Commit in GAR repo**
+- [ ] **Step 3: Commit in GAR repo**
 
 ```bash
 cd "C:/Users/fanny/OneDrive/Documentos/GitHub/gar"
@@ -518,60 +421,65 @@ git commit -m "feat: allow multiple pending crm_mensajes per pedido by event typ
 
 ---
 
-## Task 7: GAR — Edge Function `boleta_emitida` event
+## Task 6: GAR — Edge Function `boleta_emitida` with templates
 
 **Files:**
 - Modify: `C:\Users\fanny\OneDrive\Documentos\GitHub\gar\supabase\functions\notify-nanobot\index.ts`
 
-- [ ] **Step 1: Add `boleta_emitida` handler to Edge Function**
+- [ ] **Step 1: Add templates and boleta_emitida handler**
 
-The Edge Function currently handles `prenda_terminada`. Add a new case for `boleta_emitida`. The function should accept a payload like:
+Templates defined in the Edge Function (simple, no DB table needed yet):
 
 ```typescript
-interface BoletaPayload {
-  pedido_id: string;
-  event: 'boleta_emitida';
+const TEMPLATES_BIENVENIDA = [
+  "¡Hola {nombre}! Bienvenido/a a El Chinito Veloz 😊 Nos alegra que confíes en nosotros para el cuidado de tus prendas.\n|||\nAquí tienes tu boleta electrónica {boleta_codigo} por S/{importe}.",
+  "¡Hola {nombre}! Qué gusto tenerte como nuevo/a cliente de El Chinito Veloz 🙌\n|||\nTe enviamos tu boleta {boleta_codigo} por S/{importe}. ¡Gracias por preferirnos!",
+  "¡Bienvenido/a {nombre}! En El Chinito Veloz cuidamos tus prendas como si fueran nuestras 👕✨\n|||\nAquí está tu boleta electrónica {boleta_codigo} — S/{importe}.",
+];
+
+const TEMPLATES_RECURRENTE = [
+  "¡Hola {nombre}! Gracias por seguir confiando en El Chinito Veloz 😊\n|||\nTe enviamos tu boleta {boleta_codigo} por S/{importe}.",
+  "¡Hola {nombre}! Un gusto verte de nuevo 🙌\n|||\nAquí tienes tu boleta electrónica {boleta_codigo} — S/{importe}.",
+  "¡{nombre}! Gracias por tu preferencia ✨\n|||\nTu boleta {boleta_codigo} por S/{importe} está lista.",
+];
+```
+
+Template rendering logic:
+
+```typescript
+function renderTemplate(templates: string[], indice: number, vars: Record<string, string>): { rendered: string; nextIndex: number } {
+  const idx = indice % templates.length;
+  let rendered = templates[idx];
+  for (const [key, value] of Object.entries(vars)) {
+    rendered = rendered.replaceAll(`{${key}}`, value);
+  }
+  return { rendered, nextIndex: idx + 1 };
 }
 ```
 
-Inside the handler, after fetching pedido and cliente (reuse existing logic):
+In the handler, after gathering data:
 
 ```typescript
-// Count previous pedidos for this client to determine es_primer_pedido
-const { count: pedidosCount } = await supabase
-  .from('pedidos')
-  .select('*', { count: 'exact', head: true })
+const templates = esPrimerPedido ? TEMPLATES_BIENVENIDA : TEMPLATES_RECURRENTE;
+const { rendered, nextIndex } = renderTemplate(
+  templates,
+  cliente.ultimo_indice_plantilla || 0,
+  {
+    nombre: cliente.nombre_preferido || cliente.nombre,
+    boleta_codigo: `${pedido.boleta_serie}-${pedido.boleta_correlativo}`,
+    importe: (pedido.importe || 0).toFixed(2),
+  }
+);
+
+// Update client's template index for rotation
+await supabase
+  .from('clientes')
+  .update({ ultimo_indice_plantilla: nextIndex })
   .eq('cliente_id', cliente.cliente_id);
 
-const esPrimerPedido = (pedidosCount || 0) <= 1;
-
-// Build payload for boleta_emitida
-const webhookPayload = {
-  event: 'boleta_emitida',
-  timestamp: new Date().toISOString(),
-  sucursal_id: pedido.sucursal_id,
-  data: {
-    cliente: {
-      cliente_id: cliente.cliente_id,
-      nombre: cliente.nombre,
-      nombre_preferido: cliente.nombre_preferido || null,
-      telefono_whatsapp: phone,
-      whatsapp_opt_in: cliente.whatsapp_opt_in ?? true,
-    },
-    pedido: {
-      codigo: pedido.codigo,
-      importe: pedido.importe || 0,
-      fecha_entrega: pedido.fecha_entrega || null,
-    },
-    boleta: {
-      serie: pedido.boleta_serie,
-      correlativo: pedido.boleta_correlativo,
-      codigo_completo: `${pedido.boleta_serie}-${pedido.boleta_correlativo}`,
-      enlace_pdf: pedido.boleta_enlace_pdf,
-    },
-    es_primer_pedido: esPrimerPedido,
-    crm_mensaje_id: crmMsg.id,
-  },
+// Include rendered template in webhook payload
+webhookPayload.data.template_sugerido = {
+  contenido_renderizado: rendered,
 };
 ```
 
@@ -582,37 +490,26 @@ cd "C:/Users/fanny/OneDrive/Documentos/GitHub/gar"
 npx supabase functions deploy notify-nanobot --project-ref sxnfccqpjxoipptgsowu
 ```
 
-- [ ] **Step 3: Test manually**
-
-Via Supabase Dashboard or curl — call the Edge Function with a test pedido that has boleta data.
-
-- [ ] **Step 4: Commit in GAR repo**
+- [ ] **Step 3: Commit in GAR repo**
 
 ```bash
 cd "C:/Users/fanny/OneDrive/Documentos/GitHub/gar"
 git add supabase/functions/notify-nanobot/index.ts
-git commit -m "feat: add boleta_emitida event to notify-nanobot Edge Function"
+git commit -m "feat: add boleta_emitida event with template rendering and rotation"
 ```
 
 ---
 
-## Task 8: GAR — Trigger notification after boleta emission
+## Task 7: GAR — Trigger notification after boleta emission
 
 **Files:**
-- Modify: The hook/component that calls `emitir-boleta` Edge Function (likely in `useTicketActions.ts` or the pedido creation flow)
+- Modify: The hook/component that calls `emitir-boleta` Edge Function
 
-- [ ] **Step 1: Identify the trigger point**
+- [ ] **Step 1: Add notification call after boleta emission**
 
-Find where `emitir-boleta` is called and returns success. After it stores the boleta URLs in `pedidos`, call `notify-nanobot` with `event: 'boleta_emitida'`.
-
-Follow the pattern from `useCompletarPedido.ts`: check `whatsappConfig.modo_envio === 'api'` before calling.
-
-- [ ] **Step 2: Add the notification call**
-
-After boleta emission succeeds and URLs are stored:
+After boleta emission succeeds and URLs are stored, following the `useCompletarPedido` pattern:
 
 ```typescript
-// Notify via Nanobot if modo_envio is 'api'
 if (whatsappConfig?.modo_envio === 'api') {
   try {
     await supabase.functions.invoke('notify-nanobot', {
@@ -620,16 +517,11 @@ if (whatsappConfig?.modo_envio === 'api') {
     });
   } catch (err) {
     console.error('Error notifying nanobot:', err);
-    // Non-blocking: don't fail the boleta emission
   }
 }
 ```
 
-- [ ] **Step 3: Test E2E**
-
-Create a pedido in GAR → verify boleta emits → verify WhatsApp message arrives with text + PDF
-
-- [ ] **Step 4: Commit in GAR repo**
+- [ ] **Step 2: Commit in GAR repo**
 
 ```bash
 cd "C:/Users/fanny/OneDrive/Documentos/GitHub/gar"
@@ -639,46 +531,27 @@ git commit -m "feat: trigger WhatsApp notification after boleta emission"
 
 ---
 
-## Task 9: E2E verification
+## Task 8: E2E verification
 
-- [ ] **Step 1: Start all services** (see `reference_local_startup.md` in memory)
-
-```bash
-# 1. Evolution API
-docker compose -f docker-compose.evolution.yml up -d
-# 2. Nanobot (wait 15s for Evolution)
-PYTHONIOENCODING=utf-8 uv run nanobot gateway
-# 3. Cloudflare tunnel
-cloudflared tunnel --url http://localhost:18790
-# 4. Update tunnel URL in Supabase (user does manually)
-# 5. GAR
-cd gar && npm run dev
-```
-
-- [ ] **Step 2: Test boleta_emitida webhook directly**
+- [ ] **Step 1: Test boleta_emitida webhook with template (Nanobot only)**
 
 ```python
 import httpx
 payload = {
     "event": "boleta_emitida",
-    "timestamp": "2026-03-18T20:00:00.000Z",
+    "timestamp": "2026-03-19T14:00:00.000Z",
     "sucursal_id": "test-sucursal",
     "data": {
-        "cliente": {
-            "cliente_id": "TEST-CLI-001",
-            "nombre": "Cliente de Prueba",
-            "nombre_preferido": "Pruebita",
-            "telefono_whatsapp": "+51999999999",
-            "whatsapp_opt_in": True,
-        },
-        "pedido": {"codigo": "TEST-002", "importe": 35.00, "fecha_entrega": "2026-03-20"},
-        "boleta": {
-            "serie": "B001", "correlativo": "00009999",
-            "codigo_completo": "B001-00009999",
-            "enlace_pdf": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-        },
+        "cliente": {"cliente_id": "TEST-001", "nombre": "Test", "nombre_preferido": "Testito",
+                    "telefono_whatsapp": "+51999999999", "whatsapp_opt_in": True},
+        "pedido": {"codigo": "TEST-003", "importe": 50.00, "fecha_entrega": "2026-03-21"},
+        "boleta": {"serie": "B001", "correlativo": "00009999", "codigo_completo": "B001-00009999",
+                   "enlace_pdf": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"},
         "es_primer_pedido": True,
-        "crm_mensaje_id": "TEST-BOLETA-E2E",
+        "crm_mensaje_id": "TEST-BOLETA-TEMPLATE",
+        "template_sugerido": {
+            "contenido_renderizado": "¡Hola Testito! Bienvenido a El Chinito Veloz 😊\n|||\nAquí tu boleta B001-00009999 por S/50.00"
+        },
     },
 }
 resp = httpx.post("http://localhost:18790/webhook/crm", json=payload,
@@ -686,22 +559,13 @@ resp = httpx.post("http://localhost:18790/webhook/crm", json=payload,
 print(resp.status_code, resp.json())
 ```
 
-Expected: 202 + agent generates welcome message with `|||` + PDF sent via Evolution
+Expected: 202, no LLM call, two WhatsApp messages + PDF
 
-- [ ] **Step 3: Verify in Nanobot logs**
+- [ ] **Step 2: Test full GAR flow**
 
-Check for:
-1. `CRM webhook accepted: event=boleta_emitida`
-2. AgentLoop processing with `|||` split
-3. `Outbound → whatsapp:` with text chunk 1
-4. `Outbound → whatsapp:` with text chunk 2 (or media in same message)
-5. `_send_media` log with PDF URL
+Create pedido in GAR → boleta emits → WhatsApp arrives with template message + PDF
 
-- [ ] **Step 4: Test full GAR flow**
-
-Create a real pedido in GAR (localhost:8080) → boleta emits → WhatsApp message arrives with welcome + PDF
-
-- [ ] **Step 5: Run all Nanobot tests**
+- [ ] **Step 3: Run all Nanobot tests**
 
 ```bash
 pytest tests/ --ignore=tests/test_commands.py --ignore=tests/test_consolidate_offset.py -v
