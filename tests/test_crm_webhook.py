@@ -70,6 +70,39 @@ def _make_crm_payload(event="prenda_terminada", phone="+51987654321", crm_id="te
     }
 
 
+def _make_boleta_payload(es_primer_pedido=True, crm_id="test-boleta-uuid"):
+    return {
+        "event": "boleta_emitida",
+        "timestamp": "2026-03-18T14:30:00.000Z",
+        "sucursal_id": "test-sucursal",
+        "data": {
+            "cliente": {
+                "cliente_id": "C-000001",
+                "nombre": "María López",
+                "nombre_preferido": "Marita",
+                "telefono_whatsapp": "+51987654321",
+                "whatsapp_opt_in": True,
+            },
+            "pedido": {
+                "codigo": "B001-4",
+                "importe": 45.00,
+                "fecha_entrega": "2026-03-20",
+            },
+            "boleta": {
+                "serie": "B001",
+                "correlativo": "00001234",
+                "codigo_completo": "B001-00001234",
+                "enlace_pdf": "https://rapifac.com/boletas/xxx.pdf",
+            },
+            "es_primer_pedido": es_primer_pedido,
+            "crm_mensaje_id": crm_id,
+            "template_sugerido": {
+                "contenido_renderizado": "¡Hola Marita! Bienvenida a El Chinito Veloz\n|||\nAquí tienes tu boleta B001-00001234"
+            },
+        },
+    }
+
+
 class TestCRMWebhook:
     """Test the /webhook/crm endpoint."""
 
@@ -234,3 +267,47 @@ class TestFormatCRMEvent:
         payload["data"]["cliente"]["nombre_preferido"] = None
         result = format_crm_event(payload)
         assert "María López" in result
+
+
+class TestBoletaEmitida:
+    """Test boleta_emitida event handling."""
+
+    @pytest.fixture
+    def bus(self):
+        return MessageBus()
+
+    @pytest.fixture
+    def app(self, bus):
+        from nanobot.webhook.routes import setup_routes
+        application = web.Application()
+        application["bus"] = bus
+        application["channels"] = {}
+        application["config"] = GatewayConfig(webhook_secret="test-secret")
+        setup_routes(application)
+        return application
+
+    @pytest.mark.asyncio
+    async def test_boleta_forwards_metadata(self, aiohttp_client, app, bus):
+        crm_id = f"test-boleta-{uuid.uuid4()}"
+        client = await aiohttp_client(app)
+        await client.post(
+            "/webhook/crm",
+            json=_make_boleta_payload(crm_id=crm_id),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        assert msg.metadata["event_type"] == "boleta_emitida"
+        assert msg.metadata["boleta"]["enlace_pdf"] == "https://rapifac.com/boletas/xxx.pdf"
+        assert msg.metadata["es_primer_pedido"] is True
+
+    @pytest.mark.asyncio
+    async def test_boleta_uses_template_as_content(self, aiohttp_client, app, bus):
+        crm_id = f"test-boleta-{uuid.uuid4()}"
+        client = await aiohttp_client(app)
+        await client.post(
+            "/webhook/crm",
+            json=_make_boleta_payload(crm_id=crm_id),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        assert "Bienvenida a El Chinito Veloz" in msg.content

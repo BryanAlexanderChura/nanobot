@@ -222,6 +222,8 @@ async def handle_crm_webhook(request: web.Request) -> web.Response:
             "cliente": cliente,
             "pedido": data.get("pedido", {}),
             "prendas": data.get("prendas", []),
+            "boleta": data.get("boleta", {}),
+            "es_primer_pedido": data.get("es_primer_pedido", False),
             "template_sugerido": (data.get("template_sugerido") or {}).get(
                 "contenido_renderizado"
             ),
