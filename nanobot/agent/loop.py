@@ -195,13 +195,19 @@ class AgentLoop:
                 response = await self._process_message(msg)
                 if response:
                     chunks = _split_chunks(response.content)
+                    # Collect media from metadata (e.g., boleta PDF URL)
+                    boleta_pdf = (msg.metadata.get("boleta") or {}).get("enlace_pdf", "")
+                    media_list = [boleta_pdf] if boleta_pdf else []
+
                     for i, chunk in enumerate(chunks):
                         if i > 0:
                             await asyncio.sleep(0.8)
+                        is_last = (i == len(chunks) - 1)
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=response.channel,
                             chat_id=response.chat_id,
                             content=chunk,
+                            media=media_list if is_last else [],
                             metadata=response.metadata,
                         ))
             except Exception as e:
