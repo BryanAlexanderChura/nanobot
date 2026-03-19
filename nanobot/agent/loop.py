@@ -192,7 +192,19 @@ class AgentLoop:
         lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
         async with lock:
             try:
-                response = await self._process_message(msg)
+                # Skip LLM when template is provided (e.g., boleta_emitida)
+                template_content = msg.metadata.get("template_sugerido")
+                if template_content:
+                    out_channel = msg.metadata.get("reply_channel", msg.channel)
+                    response = OutboundMessage(
+                        channel=out_channel,
+                        chat_id=msg.chat_id,
+                        content=template_content,
+                        metadata=msg.metadata,
+                    )
+                else:
+                    response = await self._process_message(msg)
+
                 if response:
                     chunks = _split_chunks(response.content)
                     # Collect media from metadata (e.g., boleta PDF URL)
