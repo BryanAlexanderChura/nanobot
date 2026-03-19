@@ -212,9 +212,10 @@ class ChannelManager:
                         # Update crm_mensajes if this was a CRM-triggered message
                         crm_id = (msg.metadata or {}).get("crm_mensaje_id")
                         if crm_id and self._crm_client.enabled:
+                            evo_id = (msg.metadata or {}).get("evolution_msg_id", "")
                             await self._crm_client.mark_sent(
                                 crm_mensaje_id=crm_id,
-                                evolution_msg_id="",
+                                evolution_msg_id=evo_id,
                                 mensaje_generado=msg.content,
                             )
                     except Exception as e:

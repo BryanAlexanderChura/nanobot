@@ -49,23 +49,38 @@ class EvolutionChannel(BaseChannel):
         await self._stop_event.wait()
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send message via Evolution API, splitting long texts into chunks."""
-        number = self._jid_to_number(msg.chat_id)
-        chunks = self._split_message(msg.content)
+        """Send message via Evolution API, splitting long texts into chunks.
 
+        Returns the last Evolution message ID (stored in msg.metadata for CRM tracking).
+        """
+        number = self._jid_to_number(msg.chat_id)
+
+        # Send media attachments first (PDFs, images, etc.)
+        for media_path in (msg.media or []):
+            await self._send_media(number, media_path)
+
+        # Send text content
+        chunks = self._split_message(msg.content)
+        last_msg_id = ""
         for chunk in chunks:
-            await self._send_text(number, chunk)
+            msg_id = await self._send_text(number, chunk)
+            if msg_id:
+                last_msg_id = msg_id
             if len(chunks) > 1:
                 await asyncio.sleep(0.8)  # Small delay between chunks
 
-    async def _send_text(self, number: str, text: str) -> None:
-        """Send a single text message to a number."""
+        # Store Evolution message ID in metadata for CRM tracking
+        if last_msg_id:
+            msg.metadata["evolution_msg_id"] = last_msg_id
+
+    async def _send_text(self, number: str, text: str) -> str:
+        """Send a single text message to a number. Returns Evolution message ID."""
         if not text or not text.strip():
-            return
+            return ""
 
         if self._mock_mode:
             logger.info("[EvolutionChannel MOCK] → {}: {}", number, text[:200])
-            return
+            return ""
 
         try:
             resp = await self._client.post(
@@ -76,8 +91,65 @@ class EvolutionChannel(BaseChannel):
                 logger.error(
                     "Evolution API error {}: {}", resp.status_code, resp.text[:200]
                 )
+                return ""
+            # Extract message ID from Evolution response
+            data = resp.json()
+            return data.get("key", {}).get("id", "")
         except Exception as e:
             logger.error("Failed to send via Evolution API: {}", e)
+            return ""
+
+    async def _send_media(self, number: str, media_path: str) -> str:
+        """Send a media file (PDF, image, etc.) via Evolution API. Returns message ID."""
+        if self._mock_mode:
+            logger.info("[EvolutionChannel MOCK] media → {}: {}", number, media_path)
+            return ""
+
+        import mimetypes
+        import os
+
+        mime, _ = mimetypes.guess_type(media_path)
+        mime = mime or "application/octet-stream"
+        filename = os.path.basename(media_path)
+
+        # Determine media type for Evolution API
+        if mime.startswith("image/"):
+            media_type = "image"
+        elif mime.startswith("audio/"):
+            media_type = "audio"
+        elif mime.startswith("video/"):
+            media_type = "video"
+        else:
+            media_type = "document"
+
+        try:
+            import base64
+            with open(media_path, "rb") as f:
+                media_b64 = base64.b64encode(f.read()).decode()
+
+            resp = await self._client.post(
+                f"/message/sendMedia/{self.config.evolution_instance}",
+                json={
+                    "number": number,
+                    "mediatype": media_type,
+                    "mimetype": mime,
+                    "fileName": filename,
+                    "media": f"data:{mime};base64,{media_b64}",
+                },
+            )
+            if resp.status_code not in (200, 201):
+                logger.error(
+                    "Evolution API media error {}: {}", resp.status_code, resp.text[:200]
+                )
+                return ""
+            data = resp.json()
+            return data.get("key", {}).get("id", "")
+        except FileNotFoundError:
+            logger.error("Media file not found: {}", media_path)
+            return ""
+        except Exception as e:
+            logger.error("Failed to send media via Evolution API: {}", e)
+            return ""
 
     async def stop(self) -> None:
         """Stop the channel and close HTTP client."""

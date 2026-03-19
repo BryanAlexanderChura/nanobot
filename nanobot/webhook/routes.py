@@ -9,8 +9,9 @@ from loguru import logger
 
 from nanobot.bus.events import InboundMessage
 
-# Deduplication buffer: Evolution API may send the same message multiple times
+# Deduplication buffers
 _processed_ids: OrderedDict[str, None] = OrderedDict()
+_processed_crm_ids: OrderedDict[str, None] = OrderedDict()
 _MAX_DEDUP = 1000
 
 
@@ -193,6 +194,17 @@ async def handle_crm_webhook(request: web.Request) -> web.Response:
             {"status": "error", "error": "Missing required field: data.crm_mensaje_id"},
             status=400,
         )
+
+    # Dedup: prevent duplicate processing if Edge Function retries
+    if crm_mensaje_id in _processed_crm_ids:
+        logger.info("Duplicate CRM event ignored: {}", crm_mensaje_id)
+        return web.json_response(
+            {"status": "duplicate", "crm_mensaje_id": crm_mensaje_id},
+            status=200,
+        )
+    _processed_crm_ids[crm_mensaje_id] = None
+    while len(_processed_crm_ids) > _MAX_DEDUP:
+        _processed_crm_ids.popitem(last=False)
 
     # Build InboundMessage
     event_type = payload.get("event", "unknown")

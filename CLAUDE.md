@@ -96,6 +96,18 @@ Separate Node.js process (`bridge/`) using Baileys. Communicates with Python via
 
 `agent/subagent.py` — Spawns background async tasks with reduced tool set. Announces completion via bus as "system" channel messages routed back to original channel/chat.
 
+### GAR CRM Integration
+
+Nanobot integra con GAR CRM (lavandería) para notificaciones automáticas por WhatsApp. Contrato completo en `docs/contracts/nanobot-gar-integration.md`. GAR tiene su tarjeta de interfaz en `docs/NANOBOT_INTERFACE.md`.
+
+- **Webhook:** `POST /webhook/crm` recibe eventos de GAR (prenda_terminada, pago_asignado, boleta_emitida)
+- **Dedup:** Buffer de `crm_mensaje_id` procesados (previene duplicados de Edge Function retries)
+- **Routing:** Eventos CRM entran como `crm_event` channel, salen por `whatsapp` via `reply_channel` metadata
+- **Supabase:** `integrations/supabase.py` actualiza `crm_mensajes` table (enviado_api/fallido)
+- **Media:** `EvolutionChannel._send_media()` soporta PDFs vía Evolution API `sendMedia` endpoint
+- **Tabla compartida:** `crm_mensajes` — GAR crea registro (`pendiente`), Nanobot actualiza estado final
+- **Evolution API:** Puerto `8085` (host), Docker container interno en `8080`
+
 ## Docker
 
 Archivos: `Dockerfile`, `docker-compose.yml`, `.env.example`

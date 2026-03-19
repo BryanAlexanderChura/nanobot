@@ -2,6 +2,7 @@
 """Tests for CRM webhook integration."""
 
 import asyncio
+import uuid
 
 import pytest
 from aiohttp import web
@@ -89,19 +90,21 @@ class TestCRMWebhook:
     @pytest.mark.asyncio
     async def test_valid_crm_event_returns_202(self, aiohttp_client, app):
         client = await aiohttp_client(app)
+        crm_id = f"test-{uuid.uuid4()}"
         resp = await client.post(
             "/webhook/crm",
-            json=_make_crm_payload(),
+            json=_make_crm_payload(crm_id=crm_id),
             headers={"Authorization": "Bearer test-secret"},
         )
         assert resp.status == 202
 
     @pytest.mark.asyncio
     async def test_valid_crm_event_publishes_to_bus(self, aiohttp_client, app, bus):
+        crm_id = f"test-{uuid.uuid4()}"
         client = await aiohttp_client(app)
         await client.post(
             "/webhook/crm",
-            json=_make_crm_payload(),
+            json=_make_crm_payload(crm_id=crm_id),
             headers={"Authorization": "Bearer test-secret"},
         )
         msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
@@ -111,8 +114,30 @@ class TestCRMWebhook:
         assert "prenda_terminada" in msg.content
         assert "Marita" in msg.content
         assert msg.metadata["event_type"] == "prenda_terminada"
-        assert msg.metadata["crm_mensaje_id"] == "test-uuid"
+        assert msg.metadata["crm_mensaje_id"] == crm_id
         assert msg.metadata["reply_channel"] == "whatsapp"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_crm_event_returns_200(self, aiohttp_client, app):
+        """Duplicate crm_mensaje_id should be ignored with 200."""
+        crm_id = f"test-dedup-{uuid.uuid4()}"
+        client = await aiohttp_client(app)
+        # First request: accepted
+        resp1 = await client.post(
+            "/webhook/crm",
+            json=_make_crm_payload(crm_id=crm_id),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        assert resp1.status == 202
+        # Second request: duplicate
+        resp2 = await client.post(
+            "/webhook/crm",
+            json=_make_crm_payload(crm_id=crm_id),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        assert resp2.status == 200
+        data = await resp2.json()
+        assert data["status"] == "duplicate"
 
     @pytest.mark.asyncio
     async def test_missing_auth_returns_401(self, aiohttp_client, app):
@@ -146,7 +171,7 @@ class TestCRMWebhook:
     @pytest.mark.asyncio
     async def test_missing_phone_returns_400(self, aiohttp_client, app):
         client = await aiohttp_client(app)
-        payload = _make_crm_payload()
+        payload = _make_crm_payload(crm_id=f"test-{uuid.uuid4()}")
         del payload["data"]["cliente"]["telefono_whatsapp"]
         resp = await client.post(
             "/webhook/crm",
@@ -158,7 +183,7 @@ class TestCRMWebhook:
     @pytest.mark.asyncio
     async def test_missing_crm_mensaje_id_returns_400(self, aiohttp_client, app):
         client = await aiohttp_client(app)
-        payload = _make_crm_payload()
+        payload = _make_crm_payload(crm_id=f"test-{uuid.uuid4()}")
         del payload["data"]["crm_mensaje_id"]
         resp = await client.post(
             "/webhook/crm",
@@ -201,8 +226,7 @@ class TestFormatCRMEvent:
             "contenido_renderizado": "Hola Marita! Tus prendas están listas."
         }
         result = format_crm_event(payload)
-        assert "Hola Marita! Tus prendas están listas." in result
-        assert "mensaje exacto" in result
+        assert result == "Hola Marita! Tus prendas están listas."
 
     def test_format_without_nombre_preferido(self):
         from nanobot.webhook.routes import format_crm_event
