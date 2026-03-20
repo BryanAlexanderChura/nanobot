@@ -126,7 +126,7 @@ Authorization: Bearer ${NANOBOT_WEBHOOK_SECRET}
 }
 ```
 
-### Payload: `boleta_emitida` (Fase 3)
+### Payload: `boleta_emitida`
 
 ```jsonc
 {
@@ -140,14 +140,19 @@ Authorization: Bearer ${NANOBOT_WEBHOOK_SECRET}
       "serie": "B001",
       "correlativo": "00001234",
       "codigo_completo": "B001-00001234",
-      "enlace_pdf": "https://...",
-      "enlace_xml": "https://...",
-      "enlace_cdr": "https://..."
+      "pdf_base64": "<base64 encoded PDF or null>",  // Generado por generar-ticket-pdf
+      "pdf_filename": "Boleta-B001-00001234.pdf"
     },
-    "crm_mensaje_id": "uuid-mensaje"
+    "es_primer_pedido": true,
+    "crm_mensaje_id": "uuid-mensaje",
+    "template_sugerido": {                            // Presente cuando hay templates en DB
+      "contenido_renderizado": "¡Hola María! ..."
+    }
   }
 }
 ```
+
+> **Nota (2026-03-19):** Ambos eventos (`prenda_terminada` y `boleta_emitida`) ahora leen templates desde la tabla `whatsapp_templates` en GAR. Cuando hay templates disponibles, el payload incluye `template_sugerido.contenido_renderizado` y Nanobot bypassa el LLM. Si no hay templates en DB, el campo se omite y Nanobot usa LLM como fallback. El PDF de boleta se genera internamente via `generar-ticket-pdf` (base64), reemplazando el anterior `enlace_pdf` de SUNAT.
 
 ### Respuestas esperadas de Nanobot
 
