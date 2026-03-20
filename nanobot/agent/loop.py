@@ -1,6 +1,7 @@
 """Agent loop: the core processing engine."""
 
 import asyncio
+import base64
 import json
 import shutil
 import tempfile
@@ -207,9 +208,24 @@ class AgentLoop:
 
                 if response:
                     chunks = _split_chunks(response.content)
-                    # Collect media from metadata (e.g., boleta PDF URL)
-                    boleta_pdf = (msg.metadata.get("boleta") or {}).get("enlace_pdf", "")
-                    media_list = [boleta_pdf] if boleta_pdf else []
+                    # Collect media from metadata (e.g., boleta PDF as base64)
+                    boleta = msg.metadata.get("boleta") or {}
+                    pdf_b64 = boleta.get("pdf_base64")
+                    media_list: list[str] = []
+                    if pdf_b64:
+                        try:
+                            pdf_bytes = base64.b64decode(pdf_b64)
+                            pdf_name = boleta.get("pdf_filename", "boleta.pdf")
+                            tmp = tempfile.NamedTemporaryFile(
+                                delete=False,
+                                suffix=".pdf",
+                                prefix=pdf_name.replace(".pdf", "_"),
+                            )
+                            tmp.write(pdf_bytes)
+                            tmp.close()
+                            media_list = [tmp.name]
+                        except Exception as e:
+                            logger.error("Failed to decode PDF base64: {}", e)
 
                     for i, chunk in enumerate(chunks):
                         if i > 0:
