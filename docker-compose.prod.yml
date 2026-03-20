@@ -1,0 +1,102 @@
+# Production — VPS deployment
+#
+# Usage:
+#   cp .env.production .env
+#   # Edit .env with your actual API keys and domain
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# All services share the 'nanobot-net' network.
+# Internal hostnames: nanobot, whatsapp-api, whatsapp-db, whatsapp-cache
+
+services:
+  # ── Nanobot gateway ──────────────────────────────────────────────
+  nanobot:
+    build: .
+    container_name: nanobot
+    restart: unless-stopped
+    ports:
+      - "18790:18790"
+    volumes:
+      - nanobot-data:/root/.nanobot
+      - ./workspace:/root/.nanobot/workspace:ro
+    env_file:
+      - .env
+    environment:
+      # Override URLs to use Docker internal network
+      - NANOBOT_CHANNELS__WHATSAPP__EVOLUTION_API_URL=http://whatsapp-api:8080
+      - NANOBOT_AGENTS__DEFAULTS__WORKSPACE=/root/.nanobot/workspace
+    entrypoint: ["bash", "-c"]
+    command: ["cd /app/bridge && node dist/index.js & nanobot gateway"]
+    depends_on:
+      whatsapp-api:
+        condition: service_started
+    networks:
+      - nanobot-net
+
+  # ── Evolution API (WhatsApp) ─────────────────────────────────────
+  whatsapp-api:
+    image: evoapicloud/evolution-api:v2.3.7
+    container_name: whatsapp_api
+    restart: unless-stopped
+    ports:
+      - "${EVOLUTION_HOST_PORT:-8085}:8080"
+    environment:
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-nanobot-evo-local-key}
+      - SERVER_URL=${EVOLUTION_SERVER_URL:-http://localhost:8085}
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evo:${POSTGRES_PASSWORD:-evo123}@whatsapp-db:5432/evolution
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://whatsapp-cache:6379
+      - CACHE_REDIS_PREFIX_KEY=evo
+      - CACHE_LOCAL_ENABLED=false
+      - WEBHOOK_GLOBAL_ENABLED=true
+      - WEBHOOK_GLOBAL_URL=http://nanobot:18790/webhook/evolution
+      - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
+      - WEBHOOK_EVENTS_CONNECTION_UPDATE=true
+      - WEBHOOK_EVENTS_QRCODE_UPDATED=true
+    volumes:
+      - whatsapp_sessions:/evolution/instances
+    depends_on:
+      whatsapp-db:
+        condition: service_healthy
+      whatsapp-cache:
+        condition: service_started
+    networks:
+      - nanobot-net
+
+  # ── PostgreSQL (Evolution) ───────────────────────────────────────
+  whatsapp-db:
+    image: postgres:15-alpine
+    container_name: whatsapp_db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=evo
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-evo123}
+    volumes:
+      - whatsapp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nanobot-net
+
+  # ── Redis (Evolution cache) ──────────────────────────────────────
+  whatsapp-cache:
+    image: redis:7-alpine
+    container_name: whatsapp_cache
+    restart: unless-stopped
+    volumes:
+      - whatsapp_cache:/data
+    networks:
+      - nanobot-net
+
+networks:
+  nanobot-net:
+
+volumes:
+  nanobot-data:
+  whatsapp_sessions:
+  whatsapp_pgdata:
+  whatsapp_cache:
