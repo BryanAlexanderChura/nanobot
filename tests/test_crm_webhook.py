@@ -92,7 +92,8 @@ def _make_boleta_payload(es_primer_pedido=True, crm_id="test-boleta-uuid"):
                 "serie": "B001",
                 "correlativo": "00001234",
                 "codigo_completo": "B001-00001234",
-                "enlace_pdf": "https://rapifac.com/boletas/xxx.pdf",
+                "pdf_base64": "JVBER...",
+                "pdf_filename": "Boleta-B001-00001234.pdf",
             },
             "es_primer_pedido": es_primer_pedido,
             "crm_mensaje_id": crm_id,
@@ -297,7 +298,8 @@ class TestBoletaEmitida:
         )
         msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
         assert msg.metadata["event_type"] == "boleta_emitida"
-        assert msg.metadata["boleta"]["enlace_pdf"] == "https://rapifac.com/boletas/xxx.pdf"
+        assert msg.metadata["boleta"]["pdf_base64"] == "JVBER..."
+        assert msg.metadata["boleta"]["pdf_filename"] == "Boleta-B001-00001234.pdf"
         assert msg.metadata["es_primer_pedido"] is True
 
     @pytest.mark.asyncio
